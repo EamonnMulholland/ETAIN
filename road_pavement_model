@@ -1,0 +1,292 @@
+import netCDF4
+import numpy as np
+import pandas as pd
+from numpy import array
+import os
+import os.path
+import glob
+import time
+import xarray as xr #python -m pip install "dask[array]"       # Install requirements for dask array
+import bisect
+from numpy import genfromtxt
+from scipy import special
+import math
+import datetime
+import cftime
+
+Temp_Folder = #Location of EURO-CORDEX climate files
+Model_Location = #intermediary and final results written here
+
+# ====================================================================================================================
+# gen_file_locs generates a pandas dataframe with a breakdown of model & scenario, which shows the name of each file  
+# that corresponds to the max and min temperature of the net cdf file. In the case of the future projection scenarios,
+# it provides a list of the file names as there are usually 3 netcdf files for these scenarios.
+# ====================================================================================================================
+
+def gen_file_locs(): 
+    os.chdir(Temp_Folder)
+    models = next(os.walk('.'))[1] #Lists models
+    models.sort()
+    file_locs = pd.DataFrame(columns = ["model","scen","tmax","tmin"])
+    for model in models:
+        for scen in ["historical", "rcp45", "rcp85"]:
+            os.chdir(Temp_Folder + model + "/" + scen + "/")
+            tmax = [s for s in glob.glob("*.nc") if "tasmax" in s]
+            tmin = [s for s in glob.glob("*.nc") if "tasmin" in s]
+            data = pd.DataFrame(data={"model": [model], "scen": [scen], "tmax":[tmax], "tmin":[tmin]})
+            file_locs = pd.concat([data, file_locs])
+    return file_locs
+
+
+# =============================================================================
+# this converts the gridded data from rotated longitudes and latitudes to  
+# standard longitude and latitude, or vice versa.
+# =============================================================================
+
+def grid_transform(grid_in, option):
+    SP_coor = np.array([-162, -39.25])  #south pole coordinates
+    lon = grid_in[0]+180 if option==1 else grid_in[0]
+    lat = grid_in[1]
+    lon = (lon*np.pi)/180 # Convert degrees to radians
+    lat = (lat*np.pi)/180
+    SP_lon, SP_lat = SP_coor[0], SP_coor[1]
+    theta, phi = 90+SP_lat, SP_lon   # Rotation around y-axis, Rotation around z-axis
+    phi = (phi*np.pi)/180 # Convert degrees to radians
+    theta = (theta*np.pi)/180
+    x = np.cos(lon)*np.cos(lat) # Convert from spherical to cartesian coordinates
+    y = np.sin(lon)*np.cos(lat)
+    z = np.sin(lat)
+    if option == 1:     # Regular -> Rotated
+        x_new = np.cos(theta)*np.cos(phi)*x + np.cos(theta)*np.sin(phi)*y + np.sin(theta)*z
+        y_new = -np.sin(phi)*x + np.cos(phi)*y
+        z_new = -np.sin(theta)*np.cos(phi)*x - np.sin(theta)*np.sin(phi)*y + np.cos(theta)*z
+        
+    elif option == 2: # Rotated -> Regular
+        phi, theta = -phi, -theta
+        x_new = np.cos(theta)*np.cos(phi)*x + np.sin(phi)*y + np.sin(theta)*np.cos(phi)*z
+        y_new = -np.cos(theta)*np.sin(phi)*x + np.cos(phi)*y - np.sin(theta)*np.sin(phi)*z
+        z_new = -np.sin(theta)*x + np.cos(theta)*z
+    
+    lon_new = np.arctan2(y_new,x_new)   # Convert cartesian back to spherical coordinates
+    lat_new = np.arcsin(z_new)
+    lon_new = (lon_new*180)/np.pi if option==1 else  (lon_new*180)/np.pi-180 # Convert radians back to degrees
+    lon_new =lon_new+360 if lon_new<-290 else lon_new
+    lat_new = (lat_new*180)/np.pi
+    return lon_new, lat_new
+
+
+# =======================================================================================
+# get_lats_lons saves a csv file containing a numpy array of the latitudes and longitudes
+#    
+# gen_PG_df does the same but saves as a pandas df
+# =======================================================================================
+    
+def get_lats_lons():    
+    var = "tasmaxAdjust"
+    model = 'R1-G1'
+    nc = netCDF4.Dataset(Temp_Folder + model + "/historical/tasmaxAdjust_EUR-11_CNRM-CERFACS-CNRM-CM5_historical_r1i1p1_CLMcom-CCLM4-8-17_v1-JRC-SBC-EOBS10-1981-2010_day_19810101-20101231.nc", mode='r')
+    lats_temp = []
+    lat_co = []  
+    for lats in range(0,len(nc.variables[var][1])):
+        for lons in range(0,len(nc.variables[var][1][1])):
+            lats_temp.append(grid_transform([nc.variables['rlon'][lons], nc.variables['rlat'][lats]],2)[1])
+        lat_co.append(lats_temp)
+        lats_temp = []
+    lat_co = array(lat_co)
+    nc.close()
+    np.savetxt(Model_Location + "Temp/Heatwaves/lats_file.csv", lat_co, delimiter=",")
+
+def gen_PG_df():
+    PG_df = pd.DataFrame(columns = ["model","latitude","longitude","PG_hi","PG_lo"])
+    model = " "
+    nc = netCDF4.Dataset(Temp_Folder + 'R1-G1/historical/tasmaxAdjust_EUR-11_CNRM-CERFACS-CNRM-CM5_historical_r1i1p1_CLMcom-CCLM4-8-17_v1-JRC-SBC-EOBS10-1981-2010_day_19810101-20101231.nc', mode='r')
+    for lats in range(0,len(nc.variables['tasmaxAdjust'][1])):
+        for lons in range(0,len(nc.variables["tasmaxAdjust"][1][1])):
+            PG_df = PG_df.append(pd.DataFrame({"model":[model],"latitude":[(grid_transform([nc.variables['rlon'][lons], nc.variables['rlat'][lats]],2)[1])],"longitude":[(grid_transform([nc.variables['rlon'][lons], nc.variables['rlat'][lats]],2)[0])]}), sort = True)
+    PG_df.to_csv(Model_Location + "Temp/Heatwaves/PG_empty_df.csv")
+    nc.close()
+    return PG_df
+
+
+# =============================================================================
+# round up takes a number and rounds it up to the nearest Performance Grade
+# 
+# round down takes a number and rounds down to the nearest Performance Grade   
+# =============================================================================
+
+def roundup(x):    
+    hi_grades = list(range(46,646,6))
+    if (x == -1E10):
+        return -1E5
+    return hi_grades[bisect.bisect_right(hi_grades, x)]       
+
+# ================================================================================
+# gen_years_in_nc returns a list of all of the years in the net cdf file presented
+#    
+# initiate_dates returns the first and last available date for a particular year
+# ================================================================================
+
+def gen_years_in_nc(model, nc):
+    if model == 'R5-G5': #R5-G5 is the only model that works with a 360 day year calendar, and so calculating the annual standard deviation differs compared to the other models
+        old_year = (nc.variables['time'].values[0].year)
+        last_year = (nc.variables['time'].values[len(nc.variables['time'])-1].year)
+
+    else:
+        old_year = pd.to_datetime(nc.variables['time'].values[0]).date().year
+        last_year = pd.to_datetime(nc.variables['time'].values[len(nc.variables['time'].values)-1]).date().year        
+    list_of_years = list(range(old_year,last_year+1,1))
+    return list_of_years   
+
+
+def initiate_dates(year, nc, model):
+    if model == 'R5-G5': 
+        initial_date = cftime.Datetime360Day(year, 7, 1, 12, 0, 0, 0, 1, 360)
+        end_date =     cftime.Datetime360Day(year+1, 6, 30, 12, 0, 0, 0, 1, 360)
+    else:
+        initial_date = datetime.datetime(year, 7, 1)
+        end_date = datetime.datetime(year+1, 6, 30)    
+    nc_mini = nc.sel(time=slice(initial_date, end_date))  
+    return nc_mini
+
+# =========================================================================================
+# Calculates the Performance Grade for a given model, net cdf file, given the max temp
+# =========================================================================================
+    
+def run_PG_det(model, ncs):
+    if not os.path.isfile(Model_Location + "Temp/Heatwaves/lats_file.csv"):
+        get_lats_lons()
+    lats_np =  genfromtxt(Model_Location + "Temp/Heatwaves/lats_file.csv", delimiter=',')   
+    
+    t_ser_hi = [] 
+    roundup_v = np.vectorize(roundup)
+    if ((model != 'R3-G4') & (model != 'R4-G2')): list_of_years = gen_years_in_nc(model, ncs[0])  
+    else: 
+        list_of_years = []
+        for nc_no in ncs:
+            list_of_years = list_of_years + gen_years_in_nc(model, nc_no)
+            
+    for i in range(0,len(list_of_years)-1):
+        year = list_of_years[i]
+        if ((model != 'R3-G4') & (model != 'R4-G2')):
+            nc = ncs[0]       
+        else:
+            if (year >= gen_years_in_nc(model, ncs[len(ncs)-1])[0]):
+                nc = ncs[len(ncs)-1]
+            else:
+                nc = ncs[0]
+        daily_t_hi = []        
+        nc_mini = initiate_dates(year, nc, model)          
+        day_ts = len(nc_mini.variables['time'])-7 #for tmax, we look at the average maximum 7 consecutive day temp for each year, so a for loop is run until the end of the time period minus 7 days
+        nc_mini_var = nc_mini.variables['tasmaxAdjust'][:,:,:].values        
+        for day in range(0,day_ts):                                 
+            T_hi = ((sum([nc_mini_var[day+0],nc_mini_var[day+1],nc_mini_var[day+2],nc_mini_var[day+3],nc_mini_var[day+4],nc_mini_var[day+5],nc_mini_var[day+6]])/7)) 
+            daily_t_hi.append(T_hi)  
+        t_ser_hi.append(np.max(daily_t_hi,axis = 0)) #checked                     
+    std_dev = np.std(t_ser_hi, axis = 0)
+    avg_pav = np.mean(t_ser_hi, axis = 0) #checked
+    avg_pav = avg_pav - 273.15
+    MaxPavTempCalc = ((avg_pav + (2.055*std_dev)) - (0.00618*(lats_np**2)) + (0.2289*lats_np) + 42.2)*(0.9545) - 17.78
+    MaxPavTempCalc = np.nan_to_num(MaxPavTempCalc, nan = -1E10)
+    MaxPavTempCalc = roundup_v(MaxPavTempCalc)
+    MaxPavTempCalc[MaxPavTempCalc == -1E5] = 'nan'
+    rht = (0.5*(1+special.erf((((MaxPavTempCalc+17.78)/0.9545) + (0.00618*(lats_np**2)) -  (0.2289*(lats_np)) - 42.2 - (avg_pav))/(std_dev*math.sqrt(2))))*100)        
+    return MaxPavTempCalc, rht        
+
+# =============================================================================
+# runs the model for all of the historic scenarios, calling on both run_PG_dets
+# =============================================================================
+                
+def hist_max_min():
+    if not os.path.isfile(Model_Location + "Temp/Heatwaves/PG_empty_df.csv"): #only needs to be done once
+        gen_PG_df()    
+    nc_files_org = gen_file_locs()
+    nc_files = nc_files_org[nc_files_org["scen"] == "historical"].copy()
+    models = nc_files["model"].unique()
+    models.sort()    
+    for model in models:   
+        if (len(nc_files[nc_files["model"] == model].copy()['tmax'].tolist()[0]) == 0):
+            pass
+        else:
+            model_df_max = nc_files[nc_files["model"] == model].copy()['tmax'].tolist()[0][0]
+            nc = xr.open_dataset(Temp_Folder + model + "/historical/" + model_df_max)     
+            [PG_max, rht_time_ser] = run_PG_det(model, nc)            
+        np.savetxt(Model_Location + "Temp/Heatwaves/PG_hist/Performance_Grades_" + model + "_hist_hi_" + "98pc.csv", PG_max, delimiter=",")
+        np.savetxt(Model_Location + "Temp/Heatwaves/PG_hist/Reliability_" + model + "_hist_hi_" + '98pc.csv', rht_time_ser, delimiter=",")        
+
+# =============================================================================
+# runs the model for all of the future scenarios, calling on both run_PG_dets
+# =============================================================================
+            
+def fut_max_min():
+    years_of_warming = pd.read_csv(Model_Location + "Inputs/Heatwaves/climate_models_warming.csv")        
+    nc_files = gen_file_locs()
+    models = nc_files["model"].unique()
+    models.sort()
+    for model in models:
+        for rcp in ["rcp45","rcp85"]:   
+            for warming in ['1.5','2','3']:
+                print(warming)
+                yow = (years_of_warming[(years_of_warming['model'] == model) & (years_of_warming['rcp'] == rcp)][warming].tolist()[0])                                
+                nc_files = gen_file_locs()
+                PG_df_final = pd.read_csv(Model_Location + "Temp/Heatwaves/PG_empty_df.csv")
+                PG_df_final.drop(["Unnamed: 0", "PG_hi","PG_low","model","scenario"], axis=1, inplace=True)
+                model_df = nc_files[nc_files["model"] == model].copy()
+                
+                if ((len(model_df[(model_df["model"] == model) & (model_df["scen"] == rcp)]['tmax'].tolist()[0]) == 0) | (yow == 'na')):
+                    pass
+                else:
+                    yow = int(yow)
+                    yow_start = yow - 15
+                    yow_end = yow + 15
+                    
+                    hist_file = nc_files[nc_files["scen"] == "historical"].copy()
+                    hist_file_sin = hist_file[hist_file["model"] == model]['tmax'].tolist()[0][0]
+                    hist_file_loc = (Temp_Folder + model + "/historical/" + hist_file_sin)                    
+                    fut_nc_files = model_df[(model_df["model"] == model) & (model_df["scen"] == rcp)]['tmax'].tolist()[0]
+                    fut_nc_files_locs = [(Temp_Folder + model + "/" + rcp + "/") + s for s in fut_nc_files]
+                    fut_nc_files_locs.insert(0,hist_file_loc)
+                    
+                       
+                    
+                    if(yow_start >= 2011): fut_nc_files_locs = [s for s in fut_nc_files_locs if '19810101-20101231' not in s]
+                    if(yow_start >= 2041): fut_nc_files_locs = [s for s in fut_nc_files_locs if '20110101-20401231' not in s]
+                    
+                    if(yow_end < 2041): fut_nc_files_locs = [s for s in fut_nc_files_locs if '20410101-20701231' not in s]
+                    if((model == 'R5-G5') & (yow_end < 2071)): fut_nc_files_locs = [s for s in fut_nc_files_locs if '20710101-20981231' not in s]
+                    if((model != 'R5-G5') & (yow_end < 2071)): fut_nc_files_locs = [s for s in fut_nc_files_locs if '20710101-21001231' not in s]
+                    
+                    if ((model == 'R3-G4') | (model == 'R4-G2')):
+                        ncs = []
+                        for no_files in fut_nc_files_locs:                    
+                            nc_combined_x = xr.open_mfdataset(no_files, combine = 'by_coords') #combines the netcdf files into one large one
+                            start_date_x = str(yow_start) +'-07-01' #creating the 30 year time series of which the year of warming is placed in the centre
+                            end_date_x = str(yow_end) +'-06-30'
+                            if no_files == fut_nc_files_locs[0]:
+                                da_warming_x = nc_combined_x.sel(time=slice(start_date_x, str(pd.to_datetime(nc_combined_x.variables['time'].values[len(nc_combined_x.variables['time'])-1]).date().year) +'-12-31')) 
+                            else:
+                                da_warming_x = nc_combined_x.sel(time=slice(str(pd.to_datetime(nc_combined_x.variables['time'].values[0]).date().year) +'-01-01', end_date_x))         
+                            ncs.append(da_warming_x)    
+                    else:
+                        ncs_combined = xr.open_mfdataset(fut_nc_files_locs, combine = 'by_coords')
+                        if model == 'R5-G5': #R5-G5 is the only model that works with a 360 day year calendar                                                     
+                            start_date = cftime.Datetime360Day(yow_start, 7, 1, 12, 0, 0, 0)         
+                            end_date = cftime.Datetime360Day(yow_end, 6, 30, 12, 0, 0, 0)                            
+                            da_warming = ncs_combined.sel(time=slice(start_date, end_date))                              
+                        else:
+                            start_date_x = str(yow_start) +'-07-01' #creating the 30 year time series of which the year of warming is placed in the centre
+                            end_date_x = str(yow_end) +'-06-30' 
+                            da_warming = ncs_combined.sel(time=slice(start_date_x, end_date_x))                         
+                    if ((model != 'R3-G4') & (model != 'R4-G2')): [PG_max, rht_time_ser] = run_PG_det(model, [da_warming])               
+                    else: [PG_max, rht_time_ser] = run_PG_det(model, ncs)               
+                    np.savetxt(Model_Location + "Temp/Heatwaves/PG_fut/Performance_Grades_" + model + "_" + rcp + "_" + warming + "_hi_" + "98pc_all.csv", PG_max, delimiter=",")                    
+                    np.savetxt(Model_Location + "Temp/Heatwaves/PG_fut/Reliability_" + model + "_" + rcp + "_" + warming + "_hi_" + "98pc_all.csv", rht_time_ser, delimiter=",")                    
+                    
+ 
+# ====================================================================================
+# runs the script for all historic scenarios with z = 98%.                   
+# ====================================================================================
+
+def run_all():                             
+    hist_max_min()                                    
+    fut_max_min()
+
