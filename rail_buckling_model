@@ -1,0 +1,600 @@
+import math
+import numpy as np 
+from matplotlib import pyplot as plt
+from scipy import optimize
+from scipy.integrate import quad
+import sympy as sp
+import time
+import mpmath as mp
+import random
+from collections import Counter
+from scipy.optimize import curve_fit
+import os
+import pandas as pd
+
+os.chdir("") #location of PDFs.py
+from PDFs import gen_ran_par
+
+Model_Location = #results are written to this location
+
+# =============================================================================
+# Provides lateral displacement at angle Th
+# =============================================================================
+
+def w_th(theta, phi, P_bar, am_list, R, d0):
+    w_th = 0
+    for m in range(1,error_margin_m,2):
+        w_th_new = Am_th(m, P_bar, phi, am_list, R, d0)*math.cos((m*pi*theta)/(2*phi))
+        w_th  =  w_th + w_th_new
+    return w_th
+
+# =============================================================================
+# Solving for Trigonometric Parameters - Curved Track
+# =============================================================================
+
+def Am_th(m, P_bar, phi, am_list, R, d0):
+    am_num = 0
+    for am_index in range(1,error_margin_m,2): 
+        if m == am_index: am = am_list[am_num]
+        am_num = am_num + 1
+        
+    top_Am = -(am - ((P_bar/R)*cm_th(m)) + ((P_bar/(R**2)) * bm_th(m, phi, R, d0)))
+    bottom_Am_1 = ((m*pi)/(2*phi))
+    bottom_Am = ((E*Izz/(R**4)) * (bottom_Am_1**4)) - (((P_bar - t0)/(R**2))*(bottom_Am_1**2))
+    Am = top_Am/bottom_Am
+    return(Am)
+
+def f_th_init(theta, phi, P_bar, am_est, m_glo, am_check_list, F0, R, d0):  
+    wth = 0    
+    for new_m in range(1,(3+len(am_check_list)*2),2):
+        if odds_to_num(new_m) == (len(am_check_list)): am_add = am_est
+        else: am_add = am_check_list[odds_to_num(new_m)]
+        top_Am = -(am_add - ((P_bar/R)*cm_th(new_m)) + ((P_bar/(R**2)) * bm_th(new_m, phi, R, d0)))
+        bottom_Am_1 = ((new_m*pi)/(2*phi))
+        bottom_Am = ((E*Izz/(R**4)) * (bottom_Am_1**4)) - (((P_bar - t0)/(R**2))*(bottom_Am_1**2))
+        Am = top_Am/bottom_Am                 
+        wth = wth + Am*mp.cos(new_m*pi*theta/(2*phi))
+
+    if (Ballast_Type == "Granite") & (Tie_Type == "Wood"):
+        Fl = (0.3*F0) + 25    
+        wl = (0.025*F0) + 2.6
+    elif (Ballast_Type == "Slag") & (Tie_Type == "Wood"):
+        Fl = (0.06*F0) + 30    
+        wl = (0.009*F0) + 3.5
+    else: #Concrete Tie Type
+        Fl = 0.38*F0 + 950/25
+        wl = 2.25    
+    k = Fl/F0
+    mu2 = -math.log(0.01)/wl
+
+    eqn = (F0*(k+(1-k)*mp.exp(-mu2*wth)))*mp.cos(m_glo*pi*theta/(2*phi))
+    return(eqn)  
+ 
+def odds_to_num(m):
+    m_index_return = 0
+    del m_index_return
+    m_index = 0
+    for m_num in range(1,9999,2):        
+        if m == m_num:
+            return(m_index)
+        m_index = m_index + 1
+    if 'm_index_return' not in locals():
+        print("incorrect number entered in odds_to_num function")    
+
+def am_th_integral(am_est, m, phi, P_bar, am_check_list, F0, R, d0):
+    am_new = 2/phi*float(mp.quad(lambda theta: f_th_init(theta, phi, P_bar, am_est, m, am_check_list, F0, R, d0), [0, phi]))    
+    return(am_new - am_est)
+
+def am_th(m, L, P_bar, simplify_Fp, F0, R, d0):    
+    phi = L/R
+    if simplify_Fp:
+        am_new = ((4*F0)/(m*pi))*math.sin((m*pi)/2)
+        return(am_new)
+    else:  
+        list_len = 0        
+        for init_m_list in range(1,error_margin_m,2):            
+            list_len = list_len + 1
+        am_check_list = []
+        for repitition in range(0,3):
+            index_number = 0
+            for init_m in range(1,error_margin_m,2):                 
+                am = ((4*F0)/(init_m*pi))*math.sin((init_m*pi)/2)   
+                am_est_list = []
+                am_list = []
+                initial_sign = np.sign(am_th_integral(-1000, init_m, phi, P_bar, am_check_list, F0, R, d0))  
+                for am_est in np.linspace(-1000,1000,20):        
+                    am_est_list.append(am_est)
+                    ma_sign_check = am_th_integral(am_est, init_m, phi, P_bar, am_check_list, F0, R, d0)
+                    new_sign = np.sign(ma_sign_check)  
+                    if new_sign != initial_sign:
+                        am_list.append(optimize.brentq(am_th_integral, am_est_list[am_est_list.index(am_est)-1], am_est, args =  (init_m, phi, P_bar, am_check_list, F0, R, d0), xtol = 1E-3)) 
+                        initial_sign = new_sign   
+                if len(am_list) > 1: am_new = am_list[min(range(len(am_list)), key=lambda i: abs(am_list[i]-am))]                
+                elif len(am_list)==0: am_new = 0
+                else:am_new = am_list[0]
+                if len(am_check_list) <= list_len:
+                    am_check_list.append(am_new)
+                else:
+                    am_check_list[index_number] = am_new
+                index_number =+ 1
+#            print(am_check_list)
+    m_index = 0
+    for m_num in range(1,error_margin_m,2):        
+        if m == m_num:
+            m_index_return = m_index
+        m_index =+ 1
+    return(am_check_list[m_index_return])    
+    
+def bm_th(m, phi, R, d0): 
+    L0 = d0/0.0064444444444444445
+    L = phi*R
+    phi0 = L0/R    
+    bm_pre = -(16*d0)/(m*pi*(L0**2))
+    if (phi <= phi0):
+        bm = (R**2) * bm_pre * (1 - (3*(L/L0)**2) * (1 - 2*(2/(m*pi))**2))*math.sin(m*pi/2)
+    else:
+        fp = -6 * (L/L0) * (2/(m*pi)) * math.cos(m*pi*L0/(2*L))      
+        sp = 2*(-1 + 3*((2*L/(m*pi*L0))**2))*math.sin(m*pi*L0/(2*L))
+        bm = (R**2) * bm_pre*(fp + sp)
+    return bm    
+    
+def cm_th(m):
+    cm = (4/(m*pi)) * math.sin(m*pi/2)
+    return(cm)
+
+#def PR_calc(phi, P_bar):
+#    PR = 0
+#    tetha = 0*pi/180
+#    for m in range(1,error_margin_m,2):
+#        PR = PR + cm_Th(m)*math.cos(m*pi*tetha/(2*phi)) 
+#    return(PR)    
+# =============================================================================
+# Temperature Calculations - Tangent and Curved Track
+# =============================================================================
+
+def T_calc_th(P_bar, phi, am_list, R, d0):
+    L = phi*R
+    ZR = 0
+    for m in range(1,error_margin_m,2):
+        Am = Am_th(m, P_bar, phi, am_list, R, d0)
+        bm = bm_th(m, phi, R, d0)
+        
+        ZR_fp = (2*L/(m*pi*(R**2))) * Am * math.sin(m*pi/2)
+        ZR_sp = ((m*pi/2)**2) * ((Am**2)/(4*L))
+        ZR_tp = Am*bm*L/(2*(R**2))
+        
+        ZR_new = ZR_fp + ZR_sp - ZR_tp
+        
+        ZR = ZR + ZR_new
+
+    fp = P_bar/(A*E*a)
+    sp = ZR*C/(a*(1+(C*L)))
+    T = (fp + sp) 
+    return(T, fp, sp)
+
+# =============================================================================
+# Slope Equations - Tangent and Curved Tracks
+# =============================================================================
+
+def slope_th(P_bar, phi, simplify_Fp, F0, R, d0):
+    slope_th = 0
+    for m in range(1,error_margin_m,2):
+        am = am_th(m, phi, P_bar, simplify_Fp, F0, R, d0)
+        if (am == None): 
+            am = 0
+        top_Am = -(am - ((P_bar/R)*cm_th(m)) + ((P_bar/(R**2)) * bm_th(m, phi, R, d0)))
+        bottom_Am_1 = ((m*pi)/(2*phi))
+        bottom_Am = ((E*Izz/(R**4)) * (bottom_Am_1**4)) - (((P_bar - t0)/(R**2))*(bottom_Am_1**2))        
+        Am = top_Am/bottom_Am
+        slope_th_new = m*Am*math.sin((m*pi)/(2))
+        slope_th = slope_th + slope_th_new
+    return slope_th
+
+def edge_slope_th(P_bar, phi, simplify_Fp, F0, R, d0):
+    edge_slope_th = 0
+    edge_slope_th_new = 1
+    for m in range(1,error_margin_m,2):
+        am = am_th(m, phi, P_bar, simplify_Fp, F0, R, d0)
+        if (am == None): am = 0
+        top_Am = -(am - ((P_bar/R)*cm_th(m)) + ((P_bar/(R**2)) * bm_th(m, phi, R, d0)))
+        bottom_Am_1 = ((m*pi)/(2*phi))
+        bottom_Am = ((E*Izz/(R**4)) * (bottom_Am_1**4)) - (((P_bar - t0)/(R**2))*(bottom_Am_1**2))        
+        Am = top_Am/bottom_Am
+        edge_slope_th_new = -((m*pi)/(2*phi))*Am*math.sin((m*pi)/(2))
+        edge_slope_th = edge_slope_th + edge_slope_th_new
+    return edge_slope_th
+
+# =============================================================================
+# Differential Equation Check - Tangent and Curved Tracks
+# =============================================================================
+
+def check_th(P_bar, phi, am_list, F0, R, d0):    
+    theta = 0
+    d4w_dTh = 0
+    d2w_dTh = 0
+    F_wTh = 0
+    d2w0_dTh = 0
+    PR_comp = 0
+    for m in range(1,error_margin_m,2):
+        d4w_dTh = d4w_dTh + (Am_th(m, P_bar, phi, am_list, R, d0)*(((m*pi)/(2*phi))**4)*math.cos((m*pi*theta)/(2*phi)))
+        d2w_dTh = d2w_dTh - (Am_th(m, P_bar, phi, am_list, R, d0)*(((m*pi)/(2*phi))**2)*math.cos((m*pi*theta)/(2*phi)))
+        F_wTh = F_wTh + (am_th(m, phi, P_bar, simplify_Fp, F0, R, d0) * math.cos((m*pi*theta)/(2*phi)))
+        d2w0_dTh = d2w0_dTh + (bm_th(m, phi, R, d0)*math.cos((m*pi*theta)/(2*phi)))  
+        PR_comp = PR_comp + (P_bar/R * cm_th(m) * math.cos((m*pi*theta)/(2*phi)))
+    LHS = round(((E*Izz/(R**4))*d4w_dTh) + ((P_bar-t0)/(R**2))*d2w_dTh, 2)
+    RHS = round(-F_wTh + PR_comp - d2w0_dTh, 2)    
+    if (LHS != RHS):
+        return False
+    else:
+        return True
+
+# =============================================================================
+# Buckling Energy - Curved Track
+# =============================================================================
+
+def pre_integral_th(theta, phi, P_bar, am_list, F0, R, d0):    
+    w_th = 0    
+    L = phi*R
+    for m in range(1,error_margin_m,2):
+        w_th_new = Am_th(m, P_bar, phi, am_list, R, d0)*sp.cos((m*pi*theta)/(2*L))
+        w_th  =  w_th + w_th_new            
+    return(F0*w_th)
+
+
+#
+#E_Buck = Energy_Calc_th(P_calc_list[E_index], L_calc_list[E_index], am_E_list, Ener_simplify_Fp, F0, R, d0)
+#P_bar = P_calc_list[E_index]
+#L = L_calc_list[E_index]
+#am_list = am_E_list
+#simplify_Fp = True
+
+def Energy_Calc_th(P_bar,  L, am_list, simplify_Fp, F0, R, d0):        
+    phi = L/R
+    T_energy = T_calc_th(P_bar, phi, am_list, R, d0)[0]    
+    s_brcks = ((P_bar/(A*E)) * (L + 1/(2*C))) + ((a*T_energy)/C)
+    c_brcks = ((P_bar/(A*E)) * s_brcks) - (((a * T_energy)**2) * (L+3/(2*C)))
+    
+    sum_Am = 0
+    for m in range(1,error_margin_m,2):
+        sum_Am_new = ((m*pi)**4) * (Am_th(m, P_bar, phi, am_list, R, d0)**2)
+        sum_Am = sum_Am + sum_Am_new
+    Delta_V = ((A*E/2) * c_brcks) + ((E*Izz/(64*(L**3))) * sum_Am)
+
+    W1 = quad(pre_integral_th,0,L, args = (phi, P_bar, am_list, F0, R, d0))[0]    
+
+    
+    
+    
+    W2 = kf/(4*(C**3)) * (P_bar/(A*E) - a*T_energy)**2
+    energy = Delta_V + W1 + W2
+    return(energy)
+
+    
+# =============================================================================
+# Generate the Profile of Displacement
+# =============================================================================
+
+def gen_profile_graph_th(phi, P_bar, am_list, R, d0):
+    wth_list = []
+    th_list = []
+    for theta in np.linspace(-phi,phi,50):
+        th_list.append(theta)
+        wth_list.append(w_th(theta, phi, P_bar, am_list, R, d0))
+    return(th_list, wth_list)    
+
+# =============================================================================
+# Computing the dynamic response
+# =============================================================================
+
+def Fp_calc():        
+    A_HC = Fp_calc_sp
+    B_HC = Fp_calc_sp + Hopper_axle_spacing
+    C_HC = Fp_calc_sp + Hopper_TCS
+    D_HC = Fp_calc_sp + Hopper_TCS + Hopper_axle_spacing
+    
+    if units == "imperial":
+        profile_sp = A_HC #start point
+        profile_ep = D_HC #end point
+    else: #metric
+        profile_sp = 800*0.0254 
+        profile_ep = 2000*0.0254        
+    
+    def f(s):
+        return (Hopper_full_load*mp.exp(-A_HC*s) + Hopper_full_load*mp.exp(-B_HC*s) + Hopper_full_load*mp.exp(-C_HC*s) + Hopper_full_load*mp.exp(-D_HC*s) + (Q/s))/((E*Iyy*(s**4)) + Kv)
+    vertical_deflection_profile = []
+    x_deflection_profile = []
+    F_x = []
+    for x in np.linspace(profile_sp,profile_ep,100):
+        Rv = Kv*float(mp.invertlaplace(f, x, method = 'dehoog'))
+        uplift_check = Q + Rv
+        vertical_deflection_profile.append(uplift_check)
+        x_deflection_profile.append(x)        
+        if uplift_check < 0:
+            Fpnew = Fp - mu*Q
+        else:
+            Fpnew = Fp + mu*Rv
+        F_x.append(Fpnew)           
+    return min(F_x)
+
+# =============================================================================
+# Computes Tmin, Tmax, and the corresponding buckling energy
+# =============================================================================
+
+def gen_curve(units, simplify_Fp, F0, details, energy_details, R, d0):    
+    temp_simplify_Fp = simplify_Fp
+    temp_F0 = F0
+    L_lim = 400
+    P_lim, P_max = 2248000, 2248000
+    w_lim = 30
+    T_lim, T_min = 500, 500
+    E_lim = 100000 
+    T_units = "Degrees Fahrenheit"
+    P_units = "kips/rail"
+    L_units = "inches"
+    E_units = "in-kips"
+    
+    T_calc_list, w_calc_list, P_calc_list, E_calc_list, L_calc_list, E_T_list = [],[],[],[],[],[] 
+    T_max, T_max_Buckle_Force, T_min_Buckle_Force, P_init, wth_bm = 0,0,0,0,0  
+    max_temp_reached, min_temp_reached, second_max_temp_reached = [False, False, False]      
+    max_deflection, max_half_wavelength = 'unknown','unknown'
+    if details: print("Calculating Buckling Temperatures...")
+    
+    for L in np.linspace(1E-3,L_lim, 100):  
+        phi = L/R
+        skip = False
+#        if details:print("L:" + str(round(L,2)))
+        estimate_list = [] 
+        P_list = []
+        initial_sign = np.sign(edge_slope_th(P_init, phi, temp_simplify_Fp, temp_F0, R, d0))       
+
+        for P in np.linspace(P_init, P_lim, 100): 
+
+            am_master_list = []
+#            print(P)
+            if not max_temp_reached:
+                cond0 = (P < P_init)
+            else:
+                cond0 = False
+            if (P > P_max) | second_max_temp_reached | cond0 | skip | min_temp_reached:
+                continue
+            else:
+                P_list.append(P)
+                slope_check = edge_slope_th(P, phi, temp_simplify_Fp, temp_F0, R, d0)
+#                print(slope_check)
+                new_sign = np.sign(slope_check)
+                if new_sign != initial_sign:
+                    initial_sign = new_sign
+                    P_est_lo = P_list[len(P_list)-2]
+                    P_est_hi = P_list[len(P_list)-1]
+                    estimate_list.append([P_est_lo, P_est_hi])
+                    P_bar = optimize.brentq(edge_slope_th, P_est_lo, P_est_hi, args =  (phi, temp_simplify_Fp, temp_F0, R, d0), xtol = 1E-4)                         
+                    
+                    for m in range(1,error_margin_m,2):
+                        am_temp = am_th(m, phi, P_bar, temp_simplify_Fp, temp_F0, R, d0)
+                        if am_temp == None:  am_master_list.append(0)
+                        else: am_master_list.append(am_temp)                                 
+                    wth = (w_th(0, phi, P_bar, am_master_list, R, d0))
+                    
+                    T_buck = T_calc_th(P_bar, phi, am_master_list, R, d0)[0]
+#                    print("w: " + str(wth))
+#                    print("T: " + str(T_buck))
+#                    print("...")
+#                    
+                                        
+                    cond1 = (abs(wth) < w_lim) #removes very large values of deflection                  
+                    cond2 = (T_buck < T_lim) #keeps the temperature below a certain specified threshold
+                    cond3 = (wth >= max(gen_profile_graph_th(phi, P_bar, am_master_list, R, d0)[1])) #This assumes the type of buckling curve. In particular, it assumes at x = 0, the buckling will be at its highest.
+#                    cond4 = check_th(P_bar, phi, am_master_list, F0, R, d0)
+                    cond5 = (wth > wth_bm)
+                    cond6 = abs(edge_slope_th(P_bar, phi, temp_simplify_Fp, temp_F0, R, d0)) < 1E-2
+
+                    if (cond1 & cond2 & cond3 & cond5 & cond6): 
+
+                        Delta_T = round(T_buck,2)                                           
+                        wth_bm = wth    
+                        T_calc_list.append(Delta_T)
+                        w_calc_list.append(wth)
+                        P_calc_list.append(P_bar)
+                        L_calc_list.append(L)
+                        skip = True
+#                        print("...")
+#                        print("w: " + str(wth))
+#                        print("T: " + str(T_buck)) 
+#                        print("P:" + str(P_bar))
+#                        print("...")
+                            
+                        if (Delta_T > T_max) & (max_temp_reached) & (not second_max_temp_reached):                            
+                            index = T_calc_list.index(Delta_T)
+                            max_deflection = (T_max - T_calc_list[index])*(w_calc_list[index] - w_calc_list[index - 1])/(T_calc_list[index] - T_calc_list[index - 1]) + w_calc_list[index]                        
+                            max_half_wavelength = (T_max - T_calc_list[index])*(L_calc_list[index] - L_calc_list[index - 1])/(T_calc_list[index] - T_calc_list[index - 1]) + L_calc_list[index]
+                            second_max_temp_reached = True                                    
+                        
+                        if (Delta_T < T_max) & (not max_temp_reached):
+                            max_temp_reached = True
+                           
+                        if (Delta_T > T_max) & (not max_temp_reached):
+                            T_max = Delta_T
+                            T_max_Buckle_Force = round(P_bar,2)
+
+                        if max_temp_reached & (Delta_T < T_min):
+                            T_min =  Delta_T
+                            T_min_Buckle_Force = round(P_bar,2) 
+                            min_half_wavelength = L
+                            min_deflection = max(gen_profile_graph_th(phi, P_bar, am_master_list, R, d0)[1])
+                            
+                        if max_temp_reached & (Delta_T > T_min):
+                            min_temp_reached = True
+                            
+                    continue            
+    
+    if details: print("Calculating Buckling Energy...")
+    if energy_details:
+        Ener_simplify_Fp = simplify_Fp
+        for E_index in range(T_calc_list.index(T_max),T_calc_list.index(T_min)):  
+#        for E_index in range(0,len(L_calc_list)-1):  
+            am_E_list = []
+            for m in range(1,error_margin_m,2):
+                am_E_list.append(am_th(m, L_calc_list[E_index], P_calc_list[E_index], Ener_simplify_Fp, F0, R, d0))
+            
+            E_Buck = Energy_Calc_th(P_calc_list[E_index], L_calc_list[E_index], am_E_list, Ener_simplify_Fp, F0, R, d0)
+            E_T_list.append(T_calc_list[E_index])
+            E_calc_list.append(E_Buck)
+    if details:
+        fig, axs = plt.subplots(1,2)
+        axs[0].plot(w_calc_list, T_calc_list, 'tab:orange')
+        axs[0].set_title('w by T')
+        axs[0].set_xlim([0,w_lim/1.2])
+        axs[0].set_ylim([0,T_lim])
+        if energy_details:
+            axs[1].plot(E_calc_list[0:len(E_calc_list)], E_T_list[0:len(E_calc_list)], 'tab:green')
+            axs[1].set_title('Energy ' + E_units)
+            axs[1].set_xlim([0,max(E_calc_list)])
+            axs[1].set_ylim([0,T_lim])
+            
+    if details:
+        print("Tmax = " + str(T_max) + " " + T_units + "; Tmin = " + str(T_min) + " " + T_units)
+        print("Buckle Force at Tmax = " + str(round(T_max_Buckle_Force/2000,2)) + " " + P_units + "; Buckle Force at Tmin = " + str(round(T_min_Buckle_Force/2000,2)) + " " + P_units)
+        if second_max_temp_reached: print("Max Buckling Deflection at Tmax = " + str(round(max_deflection,2)) + " " + L_units + "; Max Buckling Deflection at Tmin = " + str(round(min_deflection,2)) + " " + L_units)
+        else: print("Max Buckling Deflection at Tmax = " + "unknown" + " " + "; Max Buckling Deflection at Tmin = " + str(round(min_deflection,2)) + " " + L_units)    
+        
+        if second_max_temp_reached: print("Buckled half-wavelength at Tmax = " + str(round(max_half_wavelength,2)) + " " + L_units + "; Buckled half-wavelength at Tmin = " + str(round(min_half_wavelength,2)) + " " + L_units)
+        else: print("Buckled half-wavelength at Tmax = " + "unknown" + " " + "; Buckled half-wavelength at Tmin = " + str(round(min_half_wavelength,2)) + " " + L_units)
+        
+        if energy_details: print("Additional Energy to buckle at Tmin: " + str(round(E_calc_list[-1]/1000,2)) + E_units)    
+        
+    if (T_max - T_min) > 10:
+        T_all_1 =  T_min
+    elif ((T_max - T_min) <= 10):
+        T_all_1 = T_max - 10
+
+    T_all_2 = T_min + (0.25)*(T_max - T_min)
+    
+    if details:
+        print("")
+        print("buckling will occur at ambient air temperatures greater than: " + str((T_all_1 + SFT)/1.5) + " " + T_units)
+            
+    return(w_calc_list, T_calc_list, E_calc_list, E_T_list, T_all_1, T_all_2)
+                    
+units = "imperial"
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+E = 29E6 #Young's modulus of steel, (psi)
+a = 6.66E-6 #Thermal expansion of steel, Fractional expansion (per degree F)
+
+# =============================================================================
+# Input Variables
+# =============================================================================
+
+SFT = 50 #Rail neutral temperature, (deg F)
+Max_rail_temp = 135 #Rail maximum temperature, (deg F)
+    
+A = 2*11.91 #Cross sectional area of two rails, (in2)
+Izz = 2*12.3 #Second moment of inertia about the vertical axis (in4)
+Iyy = 2*73.4 #Second moment of inertia about the horizontal axis (in4)    
+
+#Fp = 150 #Lateral resistence per unit of track (lb/in)
+
+#R = 5729.58/curvature
+
+kf = 200 #longitudinal resistance stiffness, (psi) 
+t0 = 0 #torsional resistance perameter, (in-ips/rad/in)
+mu = 0.86 #tie to ballast coefficient of friction
+W_tie = 750 #weight of one tie including fasteners and tie plates (lb)
+W_rail = 136 #rail weight (lb/yard)
+S = 24 #tie spacing (inches)
+Q = W_tie/S + 2*W_rail/36 #self-weight of the entire track (lb/in)
+Kv = 10000 #Foundation modulus (psi)
+Hopper_full_load = 65750 # Full load of the train (lbf)
+Hopper_axle_spacing = 70 # Distance between the axles of the train (in)
+Hopper_TCS = 506 # (in)
+Tie_Type =  "Concrete"
+Ballast_Type = "Granite"
+Fp_calc_sp = 1000 #For calculating the dynamic response, a distance far ahead of the train is taken. in this case, 1000in is chosen.
+
+pi = math.pi
+C = math.sqrt(kf/(A*E))
+error_margin_m = 5 #Must be an odd number
+
+
+
+
+
+
+
+
+
+def probabilistic_run():
+    results = pd.DataFrame(columns = ["Curve", "Train_Type", "var", "a", "b", "T_crit"])
+    sto_iterations = 1000
+    hi_speed_d0 = 10/25.4 #assumed speed limit at 250km/hr
+    conv_d0 = 17/25.4 #assumed speed limit at 125km/hr
+    for d_input in [conv_d0,hi_speed_d0]:        
+        if d_input == hi_speed_d0: train_type = "High_Speed"
+        else: train_type = "Conventional"
+        weighted_Fx_list, weighted_dx_list = gen_ran_par(d_input) 
+        t_max_list, t_all_1_list, t_all_2_list, t_all_50pc_ener_list = [], [], [], []
+        for curvature in range(1,11):
+            R = 600/(math.sin((math.pi*curvature/180)/2)) #Radius is determined using a 100ft chord length which provides the angle of curvitude    
+            for i in range(0,sto_iterations):
+                print(i)
+                if i % 100 == 0: print(str(100*i/sto_iterations) + "%")
+                F0 = weighted_Fx_list[random.randint(0, len(weighted_Fx_list)-1)]
+                d0 = weighted_dx_list[random.randint(0, len(weighted_dx_list)-1)]                
+            
+                simplify_Fp = True
+                try:
+                    [displacement,temperatures, energy, energy_temps, T_all_1, T_all_2] = gen_curve(units, simplify_Fp, F0, False, True, R, d0)
+                    #Allowable temperature defined as 50% of max buckling energy
+                    first_num = energy.index(min(energy, key=lambda x:abs(x-max(energy)/2)))
+                    if energy[first_num] > max(energy)/2: 
+                        sec_num = first_num - 1
+                    elif energy[first_num] < max(energy)/2: 
+                        sec_num = first_num + 1
+                    t_all_50pc_ener = (((max(energy)/2) - energy[sec_num])*(energy_temps[first_num] - energy_temps[sec_num])/(energy[first_num] - energy[sec_num])) + energy_temps[sec_num]
+                    
+                except:
+                    print("failed_run")
+                    pass
+                if len(temperatures) == 0:
+                    pass
+                else:
+                    t_max_list.append(max(temperatures))
+                    t_all_1_list.append(T_all_1)
+                    t_all_2_list.append(T_all_2)
+                    t_all_50pc_ener_list.append(t_all_50pc_ener)
+        #        plt.hist(t_max_list, bins = 150)
+            for method in [t_max_list, t_all_1_list, t_all_2_list, t_all_50pc_ener_list]:
+                if method == t_max_list: method_name = "max"
+                elif method == t_all_1_list: method_name = "tall_1"
+                elif method == t_all_2_list: method_name = "tall_2"
+                elif method == t_all_50pc_ener_list: method_name = "tall_50_pc_ener"
+                t_all_uns = list(method)
+                t_all_uns.sort() 
+                buckling_temp = []
+                probability_of_buckling = []
+                cum_prob = 0
+                for t_all_un in t_all_uns:
+                    cum_prob = (sum(i <= t_all_un for i in t_all_uns)/len(t_all_uns))
+                #    cum_prob = cum_prob + Counter(t_all_1_list)[t_all_un]/
+                #    print(cum_prob)
+                ##        print(sum(i >= t_all_un for i in t_all_list))
+                    buckling_temp.append(t_all_un)
+                    probability_of_buckling.append(cum_prob)
+                max_temp = max(buckling_temp)
+                
+                
+                for s in range(1, 10):
+                    buckling_temp.append(max_temp + s*10)
+                    probability_of_buckling.append(1)
+                    t_crit = min(buckling_temp)
+                buckling_temp_temp = [s - t_crit for s in buckling_temp]    
+                def rail_prob_func(x, a, b):
+                    return (1/(1+np.exp(a*x)))**b #Initiating the curve
+                popt, pcov = curve_fit(rail_prob_func, buckling_temp_temp, probability_of_buckling)       
+                result_list = [str(curvature), train_type, method_name, popt[0], popt[1], t_crit]
+                df_length = len(results)
+                results.loc[df_length] = result_list
+    results.to_csv(Model_Location) #results written to here
