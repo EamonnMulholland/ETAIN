@@ -1,0 +1,76 @@
+import numpy as np
+from scipy.stats import norm
+import matplotlib.pyplot as plt
+from scipy.stats import uniform
+import seaborn as sns
+import random
+
+def kN_to_fbin(KNewton, Tie_Spacing):
+    return (KNewton/4.448220/Tie_Spacing)
+
+def define_d0_bins(d0):
+    return([0.25,0.4,0.3,0.05,0],[d0*0,d0*0.25/1.5,d0*0.4/1.5,d0*1/1.5,d0])
+      
+def define_F0_bins(F_lo,F_mid,F_hi):
+    return([0,0.1,0.2,0.4,0.2,0.1,0],[F_lo,F_lo+(F_mid-F_lo)*(80-72)/(100-72),F_lo+(F_mid-F_lo)*(90-72)/(100-72),F_mid,F_mid+(F_hi-F_mid)*(110-100)/(128-100),F_mid+(F_hi-F_mid)*(120-100)/(128-100),F_hi])
+    
+def F0_pdf():
+    frequency, bins = define_F0_bins(Fp_lo,Fp_mid,Fp_hi)
+    frequency_data  = []
+    for bin_index in range(0,len(bins)-1):
+        for x in range(0,int(frequency[bin_index]*100)):
+            frequency_data.append(bins[bin_index])        
+    mu, std = norm.fit(frequency_data)
+    x = np.linspace(40, 100, 100)
+    resistence_data = norm.pdf(x, mu, std)
+    resistence_data = resistence_data * 0.4/max(resistence_data)
+#    plt.plot(x, resistence_data, 'k', linewidth=2)
+    return(x,resistence_data)
+
+def d0_pdf(d0):
+    frequency, bins = define_d0_bins(d0)
+    frequency_data, misalignment_data = [], []
+    for bin_index in range(0,len(bins)-1):
+        x1, x2, y1, y2 = bins[bin_index], bins[bin_index+1], frequency[bin_index], frequency[bin_index+1]
+        m = (y2-y1)/(x2-x1)
+        b = (x1*y2 - x2*y1)/(x1-x2)
+        for x in np.linspace(x1,x2,int(frequency[bin_index]*100)):
+            misalignment_data.append(x)
+            frequency_data.append(m*x + b)
+    return(misalignment_data,frequency_data)
+   
+def return_input_values(F0,d0,d0_input):
+    F0_x = list(F0_pdf()[0])
+    F0_y = F0_pdf()[1]    
+    F_prob = F0_y[F0_x.index(min(F0_x, key=lambda x:abs(x-F0)))]
+    
+    d0_x = list(d0_pdf(d0_input)[0])
+    d0_y = d0_pdf(d0_input)[1] 
+    d_prob = d0_y[d0_x.index(min(d0_x, key=lambda x:abs(x-d0)))]
+    return(F_prob,d_prob)
+
+def gen_ran_par(d_input):
+    Fx_list = list(F0_pdf()[0])
+    Fy_list = list(F0_pdf()[1])
+    dx_list = list(d0_pdf(d_input)[0])
+    dy_list = list(d0_pdf(d_input)[1])
+        
+    Fy_list = [int(round(1E6*s,0)) for s in Fy_list]
+    dy_list = [int(round(1E6*s,0)) for s in dy_list]  
+    
+    weighted_Fx_list = []
+    weighted_dx_list = []
+    
+    for i in range(0,len(dx_list)):
+        for n in range(0,Fy_list[i]):
+            weighted_Fx_list.append(Fx_list[i])
+        for m in range(0,dy_list[i]):
+            weighted_dx_list.append(dx_list[i])    
+    return(weighted_Fx_list,weighted_dx_list)
+            
+S = 24 #tie spacing (inches)         
+d0_V80, d0_V100, d0_V140, d0_V200, d0_V270 = [22/25.4,17/25.4,14/25.4,12/25.4,10/25.4]
+Fp_lo,Fp_mid,Fp_hi,Fl_lo,Fl_mid,Fl_hi = kN_to_fbin(5200,S), kN_to_fbin(7100,S), kN_to_fbin(8100,S), kN_to_fbin(5200,S), kN_to_fbin(6200,S), kN_to_fbin(6700,S)
+wp_lo,wp_mid,wp_hi,wl_lo,wl_mid,wl_hi = 15/0.0254, 10/0.0254, 5/0.0254, 40/0.0254, 40/0.0254, 40/0.0254
+d_input = d0_V80
+max_d = max(d0_pdf(d_input)[0])
