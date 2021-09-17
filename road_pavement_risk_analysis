@@ -1,0 +1,391 @@
+import pandas as pd
+import os
+import os.path
+from numpy import genfromtxt
+import math
+
+Temp_Folder = #Location of EURO-CORDEX climate files
+Model_Location = #intermediary and final results written here
+
+os.chdir(Model_Location + "Code")
+from PG_Determination import gen_file_locs
+
+road_exclusion_classes = ['unclassified', 'construction', 'crossing', 'bus_stop', 'traffic_island', 'path','track','bridleway','track_grade1','track_grade2','track_grade3','track_grade4','track_grade5', 'unknown', 'steps','pedestrian','unsurfaced','corridor','trail','footway','none','proposed','elevator','emergency_access_point', 'give_way', 'speed_camera', 'street_lamp', 'services', 'stop', 'traffic_signals', 'turning_circle', 'toll_gantry', 'stop', 'disused', 'dummy', 'planned', 'razed', 'abandoned']
+
+discount_rate = 0.04 #Setting discount rate as 4%, ref: Walls, Smith; life cycle cost analysis in pavement design 
+
+all_rgs = ['ALB', 'AND', 'AUT', 'BEL', 'BGR', 'BIH', 'BLR', 'CHE', 'CYP', 'CZE', 'DEU', 'DNK','ESP', 'EST', 'FIN', 'FRA', 'GBR', 'GEO', 'GRC', 'HRV', 'HUN', 'IRL', 'ITA', 'LIE', 'LTU', 'LUX', 'LVA', 'MCO', 'MDA', 'MKD', 'MNE', 'NLD', 'NOR', 'POL', 'PRT', 'ROU', 'SRB', 'SVK', 'SVN', 'SWE', 'TUR', 'UKR','XKO']
+EU_rgs = ['MTA','CYP','DEU','DNK','ESP','ROU','EST','PRT','FRA','POL','GBR','SVK','HRV','NLD','HUN','IRL','ITA','LTU','LUX','GRC','CZE','FIN','LVA','SWE','SVN','AUT','BGR','BEL']
+
+one_grade_var = 0.125
+two_grade_var = 0.25
+
+# ===========================================================================================
+# load_regions returns a list of all OSM regions based on the file directory
+#
+# case returns the values surrounding a given value in a given list
+# ===========================================================================================
+
+def load_regions():
+    os.chdir(Model_Location + "/OSM")
+    regions = [name for name in os.listdir(".") if os.path.isdir(name)]
+    return regions
+
+def case(list_x, value):
+    for nums in range(0,len(list_x)-1):
+        if (value < list_x[0]):
+            return 0, list_x[0]
+        elif (list_x[nums] <= value) & (list_x[nums+1] >= value):
+            return list_x[nums], list_x[nums+1]       
+            
+# =============================================================================
+# converts a np array of lats and lons to a pandas df
+# =============================================================================
+
+def np2df(np_hi):
+    hi_lo_df = pd.read_csv(Model_Location + "Temp/Heatwaves/PG_empty_df.csv", index_col = None)[['latitude','longitude']]
+    hi_data = {'PG_hi_diff':list(range(0,len(hi_lo_df)))}
+    hi_df = pd.DataFrame(hi_data)
+    hi_lo_df = pd.DataFrame(columns = ['PG_hi_diff'], data = list(range(0,len(hi_lo_df))))
+    hi_lo_df['PG_hi_diff'] = 0
+    for lats in range(0,len(np_hi)):
+        hi_df['PG_hi_diff'][(lats*424):((lats+1)*424)] = np_hi[lats]
+    hi_lo_df['PG_hi_diff'] = hi_df['PG_hi_diff']
+    return hi_lo_df
+
+# ==================================================================================================
+# Loads the empty pandas df of lats and lons, and adds the warming, model and scenario as columns. 
+# Also loads the year of warming for each warming scenario and model.        
+# ==================================================================================================
+
+def initiate_files(model, scen, warming): 
+    PG_events_df = pd.read_csv(Model_Location + "Temp/Heatwaves/PG_empty_df.csv", index_col = None)
+    PG_events_df = PG_events_df[['latitude','longitude','model','scenario']]
+    PG_events_df['warming'] = warming
+    PG_events_df['model'] = model
+    PG_events_df['scenario'] = scen    
+    years_of_warming = pd.read_csv(Model_Location + "Inputs/Heatwaves/climate_models_warming.csv") 
+    yow = (years_of_warming[(years_of_warming['model'] == model) & (years_of_warming['rcp'] == scen)][warming].tolist()[0])
+    return yow, PG_events_df
+
+# =============================================================================
+# given two dfs of PGs, calc_PG_diff calculates the difference                
+# =============================================================================
+    
+def calc_PG_diff(correct_hi, hi_grade):
+   
+    hi_difference = (correct_hi - hi_grade)/6
+    hi_difference[hi_difference < 0] = 0 
+    hi_difference[hi_difference > 2] = 2    
+    hi_df = np2df(hi_difference)
+    
+    return hi_df
+
+# ===================================================================================
+# given a scenario, this produces a df of the maintenance schedule for each road type        
+# ===================================================================================
+        
+def gen_incorrect_grades(model, scen, warming):
+    yow = initiate_files(model, scen, warming)[0]
+    
+    if yow == 'na':
+        pass
+    else:
+        #List of hi grades if the PG is based on the historic climate
+        historic_hi_grade = genfromtxt(Model_Location + "Temp/Heatwaves/PG_hist/Performance_Grades_" + model + "_hist_hi_" + "98pc.csv", delimiter=',').astype(int)
+        #List of hi grades if the correct PG is selected, i.e., based on future climate projections
+        correct_hi_grade = genfromtxt(Model_Location + "Temp/Heatwaves/PG_fut/Performance_Grades_" + model + "_" + scen + "_" + warming + "_hi_" + "98pc_all.csv", delimiter=',').astype(int)
+                              
+        init_hi_df = calc_PG_diff(correct_hi_grade, historic_hi_grade)
+        man_sch_df = initiate_files(model, scen, warming)[1]
+        man_sch_df['total_diff'] = init_hi_df['PG_hi_diff'].copy()    
+        man_sch_df = man_sch_df.drop(['model', 'scenario', 'warming'], axis = 1)
+        for lon_lat in ['latitude','longitude']:
+            man_sch_df[lon_lat] = man_sch_df[lon_lat].round(decimals = 2)
+        man_sch_df = man_sch_df.set_index(['latitude', 'longitude'])          
+        
+        return man_sch_df
+        
+# =================================================================================
+# given a road_maintenance schedule, it calculates the discounted and salvage value
+# =================================================================================
+
+def gen_life_cycles(road_maintenance_input, grades):
+    combined_fclass = pd.DataFrame()
+    for fclass in ['motorway','trunk','primary','secondary','tertiary','other']:
+        renewal_year = road_maintenance_input[road_maintenance_input['maintenance_type'] == 'mill_and_replace_both_lanes']['year'].iloc[0]
+        road_maintenance = road_maintenance_input[road_maintenance_input['fclass'] == fclass].copy()
+        road_maintenance_temp = road_maintenance.copy()
+        iterations = math.ceil(30/renewal_year)
+        for life_cycles in range(1,iterations):
+            road_maintenance_temp['year'] = road_maintenance_temp['year'] + renewal_year
+            road_maintenance = road_maintenance.append(road_maintenance_temp)
+        road_maintenance = road_maintenance[road_maintenance['year'] < 30]
+        road_maintenance[('discounted_value_' + grades)] = road_maintenance['value']*(1/(1+discount_rate)**road_maintenance['year'])
+        road_maintenance = road_maintenance.drop(['value','maintenance_type','year'], axis = 1)
+        road_maintenance = road_maintenance.groupby(['Region','fclass']).sum().reset_index()
+        road_maintenance['salvage_value_' + grades] = ((renewal_year*iterations) - (30))/renewal_year 
+        combined_fclass = combined_fclass.append(road_maintenance)
+    return combined_fclass
+
+# =============================================================================
+# merge all gridded regions into one
+# =============================================================================
+
+def merge_regions():
+    all_regions = pd.DataFrame()
+    regions = load_regions()
+    for region in regions:
+        if os.path.isfile(Model_Location + "Temp/Heatwaves/gridded_roads/roads_NUTS_gridded_" + region + ".dbf"):
+            to_append = pd.read_csv(Model_Location + "Temp/Heatwaves/gridded_roads/" + region + '_condensed.csv')
+            to_append['region'] = region
+            all_regions = all_regions.append(to_append) 
+        else: print(region + " not found")
+    return all_regions
+
+# =============================================================================
+# calculates the NPVs of all scenarios
+# =============================================================================
+
+def gen_NPV():
+#    road_initial_value =    pd.read_excel(Model_Location + "Inputs/Heatwaves/construction_costs_per_km.xlsx", sheet_name = "OSM")   
+    road_initial_value = pd.read_excel(Model_Location + "Inputs/Other/Valuation/Road_Cost_per_kilometer.xlsx", sheet_name = "OSM_2")
+    road_initial_value['value'] = road_initial_value[ 'Value']/0.480356423853389 #reconstruction cost is reported in costs_per_km file. Changed to construction costs with this factor derived from US DoT.
+    road_maintenance_costs =  pd.read_excel(Model_Location + "Inputs/Heatwaves/road_maintenance_schedule_and_costs.xlsx", sheet_name = "OSM")   
+        
+#    def change_fclass(road_df):
+#        motorways = road_df[road_df['fclass'] == 'motorway'].copy()
+#        primary = road_df[road_df['fclass'] == 'trunk roads'].copy()
+#        secondary = road_df[road_df['fclass'] == 'local roads'].copy()
+#        tertiary = road_df[road_df['fclass'] == 'local roads'].copy()
+#        
+#        primary['fclass'] = 'primary'
+#        secondary['fclass'] = 'secondary'    
+#        tertiary['fclass'] = 'tertiary' 
+#        
+#        road_df = motorways.append(primary).append(secondary).append(tertiary)    
+#
+#        return road_df
+    
+#    road_initial_value = change_fclass(road_initial_value)
+    road_initial_value = road_initial_value[['Region','fclass','value']]
+    road_initial_value = road_initial_value.rename(columns = {'Region':'region'})   
+    road_initial_value = road_initial_value.set_index(['region', 'fclass']) 
+    
+#    road_maintenance_costs = change_fclass(road_maintenance_costs)
+    road_maintenance_costs = road_maintenance_costs[['Region', 'maintenance_type', 'fclass', 'year', 'old_value']]
+    road_maintenance_costs = road_maintenance_costs.rename(columns = {'old_value':'value'}) 
+
+
+    mill_and_replace = road_maintenance_costs[road_maintenance_costs['maintenance_type'] == 'mill_and_replace_both_lanes'].copy()
+    mill_and_replace = mill_and_replace.rename(columns = {'Region':'region'}) 
+    mill_and_replace = mill_and_replace.rename(columns = {'value':'mill_and_replace_value'}) 
+    mill_and_replace = mill_and_replace[['region','fclass','mill_and_replace_value']]
+
+    
+    nc_files = gen_file_locs()
+    
+    models = nc_files["model"].unique()
+    models.sort()
+    models = list(models)
+    models.remove('R5-G3')
+
+    regions = load_regions()
+    
+    d = {'fclass':['motorway','trunk','primary','secondary','tertiary','other'], 'number_of_lanes':[4,4,2,2,2,2]} #update this if you find better information on the number of lanes by road type
+    number_of_lanes = pd.DataFrame(data = d)
+    number_of_lanes = number_of_lanes.set_index(['fclass'])
+    
+    completion = 0
+    merged_regions = merge_regions()
+        
+    for model in models:
+        for scen in ['rcp45', 'rcp85']:
+            for warming in ['1.5','2','3']: 
+                
+                print(str(round(100*completion/(10*2*3),2)) + "%")
+                completion = completion + 1
+                yow = initiate_files(model, scen, warming)[0]
+                if (yow == 'na'): continue
+                else:
+                    reg_results = merged_regions.copy() 
+                    
+                    reg_results = reg_results[reg_results['infra_type'] == 'road']
+                    reg_results = reg_results[~reg_results['fclass'].isin(road_exclusion_classes)] #all fclasses that are not in exclusion_classes 
+                    reg_results = reg_results.rename(columns = {'Latitude':'latitude','Longitude':'longitude'})   
+                    for lon_lat in ['latitude','longitude']:
+                        reg_results[lon_lat] = reg_results[lon_lat].astype(float).round(decimals = 2) 
+                    reg_results = reg_results.set_index(['latitude', 'longitude'])
+                    
+                    fut_events_98 = gen_incorrect_grades(model, scen, warming)                     
+                    fut_events_98 = fut_events_98.rename(columns = {'total_diff':'total_diff_98'}) 
+
+                    
+                    reg_results = reg_results.join(fut_events_98).reset_index()
+                                                                               
+                    reg_results = reg_results[(reg_results['total_diff_98'] != 0)]                    
+                    
+                    
+                    reg_results.loc[(reg_results.fclass == 'motorway') | (reg_results.fclass == 'motorway_link'),"fclass"] = 'motorway'
+                    reg_results.loc[(reg_results.fclass == 'trunk') | (reg_results.fclass == 'trunk_link'),"fclass"] = 'trunk'
+                    reg_results.loc[(reg_results.fclass == 'primary') | (reg_results.fclass == 'primary_link')  ,"fclass"] = 'primary' #defining primary roads
+                    reg_results.loc[(reg_results.fclass == 'secondary') | (reg_results.fclass == 'secondary_link'),"fclass"] = 'secondary' #defining secondary roads
+                    reg_results.loc[(reg_results.fclass == 'tertiary') | (reg_results.fclass == 'tertiary_link'),"fclass"] = 'tertiary' #defining tertiary roads
+                    reg_results.loc[(reg_results.fclass != 'motorway') & (reg_results.fclass != 'trunk') & (reg_results.fclass != 'primary') & (reg_results.fclass != 'secondary') & (reg_results.fclass != 'tertiary'),"fclass"] = 'other' #defining other roads 
+                                    
+                    reg_results = reg_results.set_index(['fclass']).join(number_of_lanes).reset_index()
+                    reg_results = reg_results.set_index(['region', 'fclass']).join(road_initial_value).reset_index()
+                    reg_results['IC'] = reg_results['Road_Length'] * reg_results['value']/1000
+                    
+                    road_main_all_regs = pd.DataFrame() 
+                    for region in regions:  
+                        road_maintenance_correct = road_maintenance_costs[road_maintenance_costs['Region'] == region].copy()  
+                        road_maintenance_correct = road_maintenance_correct[['Region','maintenance_type','fclass','year','value']]
+                        road_maintenance_correct = road_maintenance_correct[road_maintenance_correct['year'] != 0]
+                        road_maintenance_1G = road_maintenance_correct.copy()
+                        road_maintenance_1G['year'] = road_maintenance_1G['year']*(1-one_grade_var)                        
+                        road_maintenance_2G = road_maintenance_correct.copy()
+                        road_maintenance_2G['year'] = road_maintenance_2G['year']*(1-two_grade_var)                      
+                        
+                        road_main_corr_final = gen_life_cycles(road_maintenance_correct, 'correct')
+                        road_main_1G_final = gen_life_cycles(road_maintenance_1G, 'one_grade')
+                        road_main_2G_final = gen_life_cycles(road_maintenance_2G, 'two_grades')
+                        road_main_allG =    road_main_corr_final.set_index(['Region', 'fclass']).join(road_main_1G_final.set_index(['Region', 'fclass'])).join(road_main_2G_final.set_index(['Region', 'fclass'])) 
+                        road_main_all_regs = road_main_all_regs.append(road_main_allG)
+                    road_main_all_regs = road_main_all_regs.reset_index()
+                    road_main_all_regs = road_main_all_regs.rename(columns = {'Region':'region'})
+                    reg_results = reg_results.set_index(['region','fclass']).join(road_main_all_regs.set_index(['region', 'fclass'])).reset_index()
+                    
+                    reg_results['R_corr']   =  reg_results['discounted_value_correct']*reg_results['number_of_lanes']*reg_results['Road_Length']/1000
+                    reg_results['R_1G'] =  reg_results['discounted_value_one_grade']*reg_results['number_of_lanes']*reg_results['Road_Length']/1000
+                    reg_results['R_2G'] =  reg_results['discounted_value_two_grades']*reg_results['number_of_lanes']*reg_results['Road_Length']/1000
+                    
+                    reg_results = reg_results.set_index(['region','fclass']).join(mill_and_replace.set_index(['region', 'fclass'])).reset_index()
+                    
+                    reg_results['Salvage_corr'] = (reg_results['mill_and_replace_value']*reg_results['number_of_lanes']*reg_results['Road_Length']/1000)*reg_results['salvage_value_correct']*(1/(1+discount_rate)**(30))
+                    reg_results['Salvage_1G'] = (reg_results['mill_and_replace_value']*reg_results['number_of_lanes']*reg_results['Road_Length']/1000)*reg_results['salvage_value_one_grade']*(1/(1+discount_rate)**(30))
+                    reg_results['Salvage_2G'] = (reg_results['mill_and_replace_value']*reg_results['number_of_lanes']*reg_results['Road_Length']/1000)*reg_results['salvage_value_two_grades']*(1/(1+discount_rate)**(30))
+                        
+                    reg_results['NPV_corr'] = reg_results['IC'] + reg_results['R_corr'] - reg_results['Salvage_corr']
+                    reg_results['NPV_1G'] = reg_results['IC'] + reg_results['R_1G'] - reg_results['Salvage_1G']
+                    reg_results['NPV_2G'] = reg_results['IC'] + reg_results['R_2G'] - reg_results['Salvage_2G']
+                    
+                    reg_results['NPV_98'] = reg_results['NPV_corr']
+                    
+                    reg_results.loc[reg_results['total_diff_98'] == 1, 'NPV_98'] = reg_results['NPV_1G']
+                    reg_results.loc[reg_results['total_diff_98'] == 2, 'NPV_98'] = reg_results['NPV_2G']
+                    
+                    reg_results["EAD"] = (reg_results['NPV_98'] - reg_results['NPV_corr'])/30
+                    
+                    NUTS = [s for s in reg_results.columns if 'NUTS' in s]
+                    
+                    reg_results = reg_results[['fclass', 'EAD', 'Road_Length'] + NUTS]
+                    reg_results = reg_results.fillna(0)
+                    
+#                    reg_results['warming'] = warming  
+#                    reg_results['scenario'] = scen   
+                              
+                	# =============================================================================
+                    # Grouping by road type and curvature, and exporting a file for each NUTS grouping            
+                    # =============================================================================
+                    road_results_road_distinction_NUTS3 = reg_results.groupby(['fclass','NUTS_3_ID','NUTS_2_ID','NUTS_1_ID','NUTS_0_ID']).sum().reset_index()
+                    road_results_road_distinction_NUTS3.to_csv(Model_Location + "Results/Road Heatwaves/road_type/" + model + "_" + scen + "_" + warming + "_NUTS3.csv")
+                    road_results_road_distinction_NUTS2 = reg_results.groupby(['fclass','NUTS_2_ID','NUTS_1_ID','NUTS_0_ID']).sum().reset_index()
+                    road_results_road_distinction_NUTS2.to_csv(Model_Location + "Results/Road Heatwaves/road_type/" + model + "_" + scen + "_" + warming + "_NUTS2.csv")
+                    road_results_road_distinction_NUTS1 = reg_results.groupby(['fclass','NUTS_1_ID','NUTS_0_ID']).sum().reset_index()
+                    road_results_road_distinction_NUTS1.to_csv(Model_Location + "Results/Road Heatwaves/road_type/" + model + "_" + scen + "_" + warming + "_NUTS1.csv")
+                    road_results_road_distinction_NUTS0 = reg_results.groupby(['fclass','NUTS_0_ID']).sum().reset_index()
+                    road_results_road_distinction_NUTS0.to_csv(Model_Location + "Results/Road Heatwaves/road_type/" + model + "_" + scen + "_" + warming + "_NUTS0.csv")
+                 
+                    reg_results = reg_results[['EAD', 'Road_Length'] + NUTS]
+                    
+                	# =============================================================================
+                    # Grouping by road type and curvature, and exporting a file for each NUTS grouping            
+                    # =============================================================================
+                    road_results_road_distinction_NUTS3 = reg_results.groupby(['NUTS_3_ID','NUTS_2_ID','NUTS_1_ID','NUTS_0_ID']).sum().reset_index()
+                    road_results_road_distinction_NUTS3.to_csv(Model_Location + "Results/Road Heatwaves/all/" + model + "_" + scen + "_" + warming + "_NUTS3.csv")
+                    road_results_road_distinction_NUTS2 = reg_results.groupby(['NUTS_2_ID','NUTS_1_ID','NUTS_0_ID']).sum().reset_index()
+                    road_results_road_distinction_NUTS2.to_csv(Model_Location + "Results/Road Heatwaves/all/" + model + "_" + scen + "_" + warming + "_NUTS2.csv")
+                    road_results_road_distinction_NUTS1 = reg_results.groupby(['NUTS_1_ID','NUTS_0_ID']).sum().reset_index()
+                    road_results_road_distinction_NUTS1.to_csv(Model_Location + "Results/Road Heatwaves/all/" + model + "_" + scen + "_" + warming + "_NUTS1.csv")
+                    road_results_road_distinction_NUTS0 = reg_results.groupby(['NUTS_0_ID']).sum().reset_index()
+                    road_results_road_distinction_NUTS0.to_csv(Model_Location + "Results/Road Heatwaves/all/" + model + "_" + scen + "_" + warming + "_NUTS0.csv")
+                    
+#                    reg_results.to_csv(Model_Location + "/Temp/Heatwaves/model_results/" + model + "_" + scen + "_" + warming + ".csv")
+
+# =============================================================================
+# Reads in all the individual model results and averages for each warming level
+# =============================================================================
+
+
+def total2country():        
+    nc_files = gen_file_locs()
+    models = nc_files["model"].unique()
+    models.sort()
+    models = list(models)
+    models.remove('R5-G3')
+    final_results = pd.DataFrame()
+    
+    country_data = {'GID_0':all_rgs}
+    final_results_template = pd.DataFrame(data = country_data)
+    
+    for model in models:
+        for scen in ['rcp45', 'rcp85']:
+            for warming in ['1.5','2','3']:
+                yow = initiate_files(model, scen, warming)[0]
+                
+                if (yow == 'na'):
+                    pass
+                else:
+                    
+                    final_results_temp = pd.read_csv(Model_Location + "/Temp/Heatwaves/model_results/" + model + "_" + scen + "_" + warming + ".csv", low_memory = False)
+                    final_results_temp['NPV_diff_98'] = (final_results_temp['NPV_98'] - final_results_temp['NPV_corr'])
+                    final_results_temp = final_results_temp[['GID_0','warming','scenario','NPV_diff_98']]
+                    
+                    final_results_temp = final_results_temp.groupby(['GID_0']).sum().reset_index()
+                    
+                    final_results_perm = final_results_template.copy()
+                    final_results_perm = final_results_perm.merge(final_results_temp, on ='GID_0', how = 'left')
+                    final_results_perm = final_results_perm.fillna(0)
+                    
+                    final_results_perm['warming'] =str(warming)
+                    final_results_perm['scenario'] = scen
+                    
+                    final_results = final_results.append(final_results_perm)
+                    
+                    
+    final_results['NPV_diff_98'] = final_results['NPV_diff_98']/(30)
+    
+    final_results = final_results.groupby(['GID_0','warming']).mean().reset_index()
+    final_results['1.5_98pc'] = final_results['NPV_diff_98']
+    final_results['2.0_98pc'] = final_results['NPV_diff_98']
+    final_results['3.0_98pc'] = final_results['NPV_diff_98']
+    
+    final_results['warming'] = final_results['warming'].astype(str)
+    for warming in ['1.5','2','3']:
+        for col in [s for s in final_results.columns[2:] if warming not in s]:
+            final_results.loc[final_results['warming']==warming, col] = 0
+    
+    final_results = final_results.drop(['warming', 'NPV_diff_98'],axis = 1)        
+    final_results = final_results.groupby(['GID_0']).sum().reset_index()
+
+    
+    final_results = final_results.drop(final_results.columns.drop(['GID_0','1.5_98pc', '2.0_98pc', '3.0_98pc']),axis = 1)     
+    
+    final_results.to_csv(Model_Location + "/Results/HeatRo_country_results.csv")
+    
+    total_country_results = final_results.copy()
+    total_country_results['GID_0'] = 'All'
+    total_country_results = total_country_results.groupby(['GID_0']).sum().reset_index()  
+    total_country_results.sum().to_csv(Model_Location + "/Results/HeatRo_total_results.csv")
+    
+    HeatFlo_EU = final_results[final_results['GID_0'].isin(EU_rgs)].copy()
+    HeatFlo_EU.to_csv(Model_Location + "/Results/HeatRo_EU_country_results.csv")
+    
+    total_EU_country_results = HeatFlo_EU.copy()
+    total_EU_country_results['GID_0'] = 'All'
+    total_EU_country_results = total_EU_country_results.groupby(['GID_0']).sum().reset_index()  
+    total_EU_country_results.sum().to_csv(Model_Location + "/Results/HeatRo_EU_total_results.csv")
+    
+#gen_NPV()
+#total2country()
