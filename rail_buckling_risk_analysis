@@ -1,0 +1,522 @@
+import netCDF4
+import numpy as np
+import pandas as pd
+from numpy import array
+import os
+import os.path
+import glob
+import time
+import xarray as xr #python -m pip install "dask[array]"       # Install requirements for dask array
+import bisect
+from numpy import genfromtxt
+from scipy import special
+import math
+import datetime
+import cftime
+from simpledbf import Dbf5
+
+Temp_Folder = "Y:/TemperaturesPrecipitation/" #Location of EURO-CORDEX climate files
+Model_Location = #intermediary and final results written here
+
+# =============================================================================
+# Converts a numpy array of size (412,424), i.e., Lat and Lon, to a pandas dataframe
+# =============================================================================
+
+def np2df(np_hi):
+    hi_lo_df = pd.read_csv(Model_Location + "Temp/Heatwaves/PG_empty_df.csv", index_col = None)[['latitude','longitude']]
+    hi_data = {'Buckle_Events':list(range(0,len(hi_lo_df)))}
+    hi_df = pd.DataFrame(hi_data)
+    hi_lo_df = pd.DataFrame(columns = ['Buckle_Events'], data = list(range(0,len(hi_lo_df))))
+    hi_lo_df['Buckle_Events'] = 0
+    for lats in range(0,len(np_hi)):
+        hi_df['Buckle_Events'][(lats*424):((lats+1)*424)] = np_hi[lats]
+    hi_lo_df['Buckle_Events'] = hi_df['Buckle_Events']
+    return hi_lo_df
+
+# =============================================================================
+# For a given column in a pandas dataframe, it converts it to a numpy array of size (412,424)
+# =============================================================================
+
+def df2np(df_hi, col_name):
+    np_array = np.zeros(shape=(412,424))
+    for lats in range(0,len(np_array)):
+        np_array[lats] = df_hi[col_name][(lats*424):((lats+1)*424)]
+    return np_array
+
+# ====================================================================================================================
+# gen_file_locs generates a pandas dataframe with a breakdown of model & scenario, which shows the name of each file  
+# that corresponds to the max and min temperature of the net cdf file. In the case of the future projection scenarios,
+# it provides a list of the file names as there are usually 3 netcdf files for these scenarios.
+# ====================================================================================================================
+
+def gen_file_locs(): 
+    os.chdir(Temp_Folder)
+    models = next(os.walk('.'))[1] #Lists models
+    models.sort()
+    file_locs = pd.DataFrame(columns = ["model","scen","tmax","tmin"])
+    for model in models:
+        for scen in ["historical", "rcp45", "rcp85"]:
+            os.chdir(Temp_Folder + model + "/" + scen + "/")
+            tmax = [s for s in glob.glob("*.nc") if "tasmax" in s]
+            tmin = [s for s in glob.glob("*.nc") if "tasmin" in s]
+            data = pd.DataFrame(data={"model": [model], "scen": [scen], "tmax":[tmax], "tmin":[tmin]})
+            file_locs = pd.concat([data, file_locs])
+    return file_locs
+
+# =============================================================================
+# this converts the gridded data from rotated longitudes and latitudes to  
+# standard longitude and latitude, or vice versa.
+# =============================================================================
+
+def grid_transform(grid_in, option):
+    SP_coor = np.array([-162, -39.25])  #south pole coordinates
+    lon = grid_in[0]+180 if option==1 else grid_in[0]
+    lat = grid_in[1]
+    lon = (lon*np.pi)/180 # Convert degrees to radians
+    lat = (lat*np.pi)/180
+    SP_lon, SP_lat = SP_coor[0], SP_coor[1]
+    theta, phi = 90+SP_lat, SP_lon   # Rotation around y-axis, Rotation around z-axis
+    phi = (phi*np.pi)/180 # Convert degrees to radians
+    theta = (theta*np.pi)/180
+    x = np.cos(lon)*np.cos(lat) # Convert from spherical to cartesian coordinates
+    y = np.sin(lon)*np.cos(lat)
+    z = np.sin(lat)
+    if option == 1:     # Regular -> Rotated
+        x_new = np.cos(theta)*np.cos(phi)*x + np.cos(theta)*np.sin(phi)*y + np.sin(theta)*z
+        y_new = -np.sin(phi)*x + np.cos(phi)*y
+        z_new = -np.sin(theta)*np.cos(phi)*x - np.sin(theta)*np.sin(phi)*y + np.cos(theta)*z
+        
+    elif option == 2: # Rotated -> Regular
+        phi, theta = -phi, -theta
+        x_new = np.cos(theta)*np.cos(phi)*x + np.sin(phi)*y + np.sin(theta)*np.cos(phi)*z
+        y_new = -np.cos(theta)*np.sin(phi)*x + np.cos(phi)*y - np.sin(theta)*np.sin(phi)*z
+        z_new = -np.sin(theta)*x + np.cos(theta)*z
+    
+    lon_new = np.arctan2(y_new,x_new)   # Convert cartesian back to spherical coordinates
+    lat_new = np.arcsin(z_new)
+    lon_new = (lon_new*180)/np.pi if option==1 else  (lon_new*180)/np.pi-180 # Convert radians back to degrees
+    lon_new =lon_new+360 if lon_new<-290 else lon_new
+    lat_new = (lat_new*180)/np.pi
+    return lon_new, lat_new
+
+# =======================================================================================
+# get_lats_lons saves a csv file containing a numpy array of the latitudes and longitudes
+#    
+# gen_PG_df does the same but saves as a pandas df
+# =======================================================================================
+    
+def get_lats_lons():    
+    var = "tasmaxAdjust"
+    model = 'R1-G1'
+    nc = netCDF4.Dataset(Temp_Folder + model + "/historical/tasmaxAdjust_EUR-11_CNRM-CERFACS-CNRM-CM5_historical_r1i1p1_CLMcom-CCLM4-8-17_v1-JRC-SBC-EOBS10-1981-2010_day_19810101-20101231.nc", mode='r')
+    lats_temp = []
+    lat_co = []  
+    for lats in range(0,len(nc.variables[var][1])):
+        for lons in range(0,len(nc.variables[var][1][1])):
+            lats_temp.append(grid_transform([nc.variables['rlon'][lons], nc.variables['rlat'][lats]],2)[1])
+        lat_co.append(lats_temp)
+        lats_temp = []
+    lat_co = array(lat_co)
+    nc.close()
+    np.savetxt(Model_Location + "Temp/Heatwaves/lats_file.csv", lat_co, delimiter=",")
+
+# =============================================================================
+# round up takes a number and rounds it up to the nearest Performance Grade
+# 
+# round down takes a number and rounds down to the nearest Performance Grade   
+# =============================================================================
+
+def roundup(x):    
+    hi_grades = list(range(46,646,6))
+    if (x == -1E10):
+        return -1E5
+    return hi_grades[bisect.bisect_right(hi_grades, x)]       
+
+# ================================================================================
+# gen_years_in_nc returns a list of all of the years in the net cdf file presented
+#    
+# initiate_dates returns the first and last available date for a particular year
+# ================================================================================
+
+def gen_years_in_nc(model, nc):
+    if model == 'R5-G5': #R5-G5 is the only model that works with a 360 day year calendar, and so calculating the annual standard deviation differs compared to the other models
+        old_year = (nc.variables['time'].values[0].year)
+        last_year = (nc.variables['time'].values[len(nc.variables['time'])-1].year)
+
+    else:
+        old_year = pd.to_datetime(nc.variables['time'].values[0]).date().year
+        last_year = pd.to_datetime(nc.variables['time'].values[len(nc.variables['time'].values)-1]).date().year        
+    list_of_years = list(range(old_year,last_year+1,1))
+    return list_of_years   
+
+def initiate_dates(year, nc, model, base):
+    if (model == 'R5-G5') & (base != 'hist'): 
+        initial_date = cftime.Datetime360Day(year, 7, 1, 12, 0, 0, 0, 1, 360)
+        end_date =     cftime.Datetime360Day(year+1, 6, 30, 12, 0, 0, 0, 1, 360)
+    elif (model != 'R5-G5') & (base != 'hist'):
+        initial_date = datetime.datetime(year, 7, 1)
+        end_date = datetime.datetime(year+1, 6, 30) 
+    elif (model == 'R5-G5') & (base == 'hist'): 
+        initial_date = cftime.Datetime360Day(year, 1, 1, 12, 0, 0, 0, 1, 360)
+        end_date =     cftime.Datetime360Day(year, 12, 30, 12, 0, 0, 0, 1, 360)
+    elif (model != 'R5-G5') & (base == 'hist'):
+        initial_date = datetime.datetime(year, 1, 1)
+        end_date = datetime.datetime(year, 12, 31)    
+    nc_mini = nc.sel(time=slice(initial_date, end_date))  
+    return nc_mini
+     
+# =============================================================================
+#  Loads OSM Regions
+# =============================================================================
+
+def load_regions(): #Returns a list all regions
+    os.chdir(Model_Location + "/OSM")
+    regions = [name for name in os.listdir(".") if os.path.isdir(name)]
+    return regions 
+
+# ====================================================================================
+# runs the script for all historic scenarios with z = 98%.                   
+# ====================================================================================
+
+def compile_rail_infra():
+    os.chdir(Model_Location + "/Temp/Heatwaves/gridded_rail")
+    master_rail_file = pd.DataFrame()
+    for rail_file in glob.glob("*.dbf"):
+        print(rail_file)
+        rail_dbf = Dbf5(Model_Location + "/Temp/Heatwaves/gridded_rail/" + rail_file)
+        rail_temp = rail_dbf.to_dataframe() #Converts from dbf to dataframe
+        rail_temp['Region'] = rail_file[len("railway_buckle_NUTS_"):rail_file.find(".dbf")]
+        master_rail_file = master_rail_file.append(rail_temp)
+    return(master_rail_file)
+
+# =============================================================================
+# Computes the Stress Free Temperature for each country, applying the 75% of 
+# the average max summer temperatureover the entire country
+# =============================================================================
+
+def calc_SFT(model):
+    if not os.path.isfile(Model_Location + "Temp/Heatwaves/lats_file.csv"):
+        get_lats_lons()
+    SFT_pd = pd.read_csv(Model_Location + "Temp/Heatwaves/PG_empty_df.csv", index_col = None)
+    SFT_pd = SFT_pd[['latitude','longitude']]
+    
+    gridded_regions = pd.read_csv(Model_Location + "/Temp/Heatwaves/gridded_regions/gridded_regions.csv")
+    gridded_regions.rename(columns={'Longitude':'longitude'}, inplace=True)   
+    gridded_regions.rename(columns={'Latitude':'latitude'}, inplace=True)            
+    nc_files_org = gen_file_locs()
+    nc_files = nc_files_org[nc_files_org["scen"] == "historical"].copy()
+    if (len(nc_files[nc_files["model"] == model].copy()['tmax'].tolist()[0]) == 0):
+        pass
+    else:
+        model_df_max = nc_files[nc_files["model"] == model].copy()['tmax'].tolist()[0][0]
+        nc = xr.open_dataset(Temp_Folder + model + "/historical/" + model_df_max)     
+        years = gen_years_in_nc(model, nc)
+        nc_master = []
+        for year in years:
+            if model == 'R5-G5': #R5-G5 is the only model that works with a 360 day year calendar                                                     
+                start_date = cftime.Datetime360Day(year, 6, 20, 12, 0, 0, 0)         
+                end_date = cftime.Datetime360Day(year, 9, 22, 12, 0, 0, 0)                            
+                nc_master.append(nc.sel(time=slice(start_date, end_date)))
+            else:
+                start_date_x = str(year) +'-06-20' #setting the dates to extend over the summer period
+                end_date_x = str(year) +'-09-22'             
+                nc_master.append(nc.sel(time=slice(start_date_x, end_date_x)))
+        nc_summer_sum = []
+        year_index = 0
+        for summer_nc in nc_master:   
+            
+            nc_summer_mini_var = summer_nc.variables['tasmaxAdjust'][:,:,:].values 
+            nc_summer_sum.append(np.mean(nc_summer_mini_var, axis = 0))
+            SFT_pd[years[year_index]] = np2df(np.mean(nc_summer_mini_var, axis = 0))
+            year_index = year_index + 1
+        
+        SFT_pd['longitude'] = (SFT_pd['longitude']).round(2).astype(str)
+        SFT_pd['latitude'] = (SFT_pd['latitude']).round(2).astype(str)
+        gridded_regions['longitude'] = (gridded_regions['longitude']).round(2).astype(str)
+        gridded_regions['latitude'] = (gridded_regions['latitude']).round(2).astype(str)
+        
+        SFT_pd = SFT_pd.set_index(['longitude','latitude'])
+        gridded_regions = gridded_regions.set_index(['longitude','latitude'])
+        gridded_regions = gridded_regions[["NUTS_0_ID"]]
+        SFT_pd_final = SFT_pd.join(gridded_regions)
+        
+        SFT_pd_final = SFT_pd_final.reset_index()
+        SFT_pd_final = SFT_pd_final[["NUTS_0_ID", "longitude", "latitude"]]
+        SFT_pd_final['Dummy'] = 0
+        SFT_pd_final = SFT_pd_final.set_index(["NUTS_0_ID", "longitude", "latitude"])
+        
+        gridded_regions = gridded_regions.join(SFT_pd).reset_index()
+        gridded_regions = gridded_regions[['NUTS_0_ID'] + years ]
+        gridded_regions = gridded_regions.groupby(['NUTS_0_ID']).mean().reset_index()
+        gridded_regions['SFT'] =  1.5*0.78*(gridded_regions.mean(axis=1)-273.15)
+        gridded_regions = gridded_regions[['NUTS_0_ID','SFT']]
+        gridded_regions = gridded_regions.set_index(['NUTS_0_ID'])
+        
+        
+        gridded_regions_temp = pd.read_csv(Model_Location + "/Temp/Heatwaves/gridded_regions/gridded_regions.csv")
+        gridded_regions_temp.rename(columns={'Longitude':'longitude'}, inplace=True)   
+        gridded_regions_temp.rename(columns={'Latitude':'latitude'}, inplace=True) 
+        gridded_regions_temp['longitude'] = (gridded_regions_temp['longitude']).round(2).astype(str)
+        gridded_regions_temp['latitude'] = (gridded_regions_temp['latitude']).round(2).astype(str)
+        gridded_regions_temp = gridded_regions_temp[['NUTS_0_ID','longitude','latitude']]
+        gridded_regions_temp = gridded_regions_temp.set_index(['NUTS_0_ID'])
+
+        gridded_regions_temp = gridded_regions_temp.join(gridded_regions).reset_index()
+        gridded_regions_temp = gridded_regions_temp.set_index(['NUTS_0_ID','longitude','latitude'])
+        SFT_pd_final = SFT_pd_final.join(gridded_regions_temp).reset_index()
+        
+        SFT_pd_final.loc[SFT_pd_final['NUTS_0_ID'] == "DE", "SFT"] = 23
+        SFT_pd_final.loc[SFT_pd_final['NUTS_0_ID'] == "ES", "SFT"] = 27 
+        SFT_pd_final.loc[SFT_pd_final['NUTS_0_ID'] == "FR", "SFT"] = 25 
+        SFT_pd_final.loc[SFT_pd_final['NUTS_0_ID'] == "IE", "SFT"] = 23 
+        SFT_pd_final.loc[SFT_pd_final['NUTS_0_ID'] == "NL", "SFT"] = 25 
+        SFT_pd_final.loc[SFT_pd_final['NUTS_0_ID'] == "UK", "SFT"] = 27 
+        
+        SFT_pd_final = df2np(SFT_pd_final,"SFT")
+        
+        np.savetxt(Model_Location + "/Temp/Heatwaves/SFT2/" + model + ".csv", SFT_pd_final, delimiter=",")
+        
+        return(SFT_pd_final)
+           
+# =============================================================================
+# For a given GCM, RCP, and Warming level, this runs a simulation of all days
+# and computes the probability of a buckling event occuring. The probability of
+# buckling is summed over the consecutive days to give the total number of 
+# buckling events over the 30 year period. It saves the results as a csv.
+# =============================================================================
+        
+def rail_buckle_analysis(model, ncs, SFT, rcp, warming):
+    rail_types = ["Conventional","High_Speed"]
+    buckling_scens = ["tangent", "curved_1", "curved_2", "curved_3", "curved_4", "curved_5", "curved_6", "curved_7", "curved_8", "curved_9", "curved_10"]
+    tangent = pd.read_csv(Model_Location + "Temp/Heatwaves/probability_curve/tangent.csv").iloc[:, 1:]
+    curved = pd.read_csv(Model_Location + "Temp/Heatwaves/probability_curve/curved.csv").iloc[:, 1:]
+    prob_curves = tangent.append(curved)
+    prob_curves.Curve = [s for s in list(map(str,list(prob_curves.Curve))) if "tangent" in s] + ["curved_" + s for s in list(map(str,list(prob_curves.Curve))) if "tangent" not in s]
+    prob_curves.T_crit = (prob_curves.T_crit - 32) * (5/9) #Converts critical temperatures for degrees F to degree C
+    buckling_metric = "tall_50_pc_ener" #max, tall_1, tall_2, tall_50_pc_ener
+    buckle_master = []
+    for rail_type in rail_types:
+        for buckling_scen in buckling_scens:
+            buckle_master.append(np.zeros(shape=(len(ncs[0].variables['rlat']),len(ncs[0].variables['rlon']))))
+    if ((model != 'R3-G4') & (model != 'R4-G2')): list_of_years = gen_years_in_nc(model, ncs[0])  
+    else: 
+        list_of_years = []
+        for nc_no in ncs:
+            list_of_years = list_of_years + gen_years_in_nc(model, nc_no)            
+    for i in range(0,len(list_of_years)-1):
+        year = list_of_years[i]
+        if ((model != 'R3-G4') & (model != 'R4-G2')):
+            nc = ncs[0]       
+        else:
+            if (year >= gen_years_in_nc(model, ncs[len(ncs)-1])[0]):
+                nc = ncs[len(ncs)-1]
+            else:
+                nc = ncs[0]
+        nc_mini = initiate_dates(year, nc, model, rcp)          
+        nc_mini_var = nc_mini.variables['tasmaxAdjust'][:,:,:].values
+        nc_mini_var = np.nan_to_num(nc_mini_var, nan = 0)
+        buckle_scen_index = 0
+        for rail_type in rail_types:
+            for buckling_scen in buckling_scens:
+                prob_curve_temp =  prob_curves[(prob_curves["Curve"] == buckling_scen) & (prob_curves["Train_Type"] == rail_type) & (prob_curves["var"] == buckling_metric)].copy()               
+                for day in nc_mini_var:  
+                    #general equation (1/(1+np.exp(a*(x-x0))))**b
+                    rail_temp = 1.5*(day - 273.15)
+                    buckle_master[buckle_scen_index] = buckle_master[buckle_scen_index] + ((1/(1+np.exp(prob_curve_temp.a.iloc[0]*((rail_temp-SFT)-prob_curve_temp.T_crit.iloc[0]))))**prob_curve_temp.b.iloc[0])
+                buckle_scen_index = buckle_scen_index + 1
+    buckle_scen_index = 0
+    for rail_type in rail_types:
+        for buckling_scen in buckling_scens:
+            np.savetxt(Model_Location + "Temp/Heatwaves/buckling_events2/" + model + "_" + rcp + "_" + warming + "_" + rail_type + "_" + buckling_scen + ".csv", buckle_master[buckle_scen_index], delimiter=",") 
+            buckle_scen_index = buckle_scen_index + 1
+       
+# =============================================================================
+# This compiles the net cdf files for the given 30 years surrounding the GWL
+# based on the model, RCP, and warming level. This module then inputs the netcdf
+# into rail_buckle_analysis above.
+# =============================================================================
+            
+def run_all():
+    years_of_warming = pd.read_csv(Model_Location + "Inputs/Heatwaves/climate_models_warming.csv")        
+    nc_files = gen_file_locs()
+    models = nc_files["model"].unique()
+    models.sort()
+    for model in models:
+        print(model)
+        if os.path.exists(Model_Location + "Temp/Heatwaves/SFT2/" + model + ".csv"):
+            pass
+        else:
+            SFT = calc_SFT(model)
+        SFT = genfromtxt(Model_Location + "Temp/Heatwaves/SFT2/" + model + ".csv", delimiter=',')
+        SFT = np.nan_to_num(SFT, nan = 999) #SFT is set very high for grids that fall outside the country areas so the damages will return a zero.
+        for rcp in ["hist","rcp45","rcp85"]:   
+            if rcp == "hist":
+                hist_file = nc_files[nc_files["scen"] == "historical"].copy()
+                hist_file_sin = hist_file[hist_file["model"] == model]['tmax'].tolist()[0][0]
+                nc_hist = xr.open_dataset(Temp_Folder + model + "/historical/" + hist_file_sin)                 
+                rail_buckle_analysis(model, [nc_hist], SFT, rcp, "hist") #For historic runs, there is no need to pick a 30 year time slice centered on the year of GWL, so an exception is made.
+            else:    
+                for warming in ['1.5','2','3']:
+                    print(warming)
+                    yow = (years_of_warming[(years_of_warming['model'] == model) & (years_of_warming['rcp'] == rcp)][warming].tolist()[0])                                
+                    nc_files = gen_file_locs()
+                    PG_df_final = pd.read_csv(Model_Location + "Temp/Heatwaves/PG_empty_df.csv")
+                    PG_df_final.drop(["Unnamed: 0", "PG_hi","PG_low","model","scenario"], axis=1, inplace=True)
+                    model_df = nc_files[nc_files["model"] == model].copy()
+                    
+                    if ((len(model_df[(model_df["model"] == model) & (model_df["scen"] == rcp)]['tmax'].tolist()[0]) == 0) | (yow == 'na')):
+                        pass
+                    else:
+                        yow = int(yow)
+                        yow_start = yow - 15
+                        yow_end = yow + 15
+                        
+                        hist_file = nc_files[nc_files["scen"] == "historical"].copy()
+                        hist_file_sin = hist_file[hist_file["model"] == model]['tmax'].tolist()[0][0]
+                        hist_file_loc = (Temp_Folder + model + "/historical/" + hist_file_sin)                    
+                        fut_nc_files = model_df[(model_df["model"] == model) & (model_df["scen"] == rcp)]['tmax'].tolist()[0]
+                        fut_nc_files_locs = [(Temp_Folder + model + "/" + rcp + "/") + s for s in fut_nc_files]
+                        fut_nc_files_locs.insert(0,hist_file_loc)
+                        
+                        if(yow_start >= 2011): fut_nc_files_locs = [s for s in fut_nc_files_locs if '19810101-20101231' not in s]
+                        if(yow_start >= 2041): fut_nc_files_locs = [s for s in fut_nc_files_locs if '20110101-20401231' not in s]
+                        
+                        if(yow_end < 2041): fut_nc_files_locs = [s for s in fut_nc_files_locs if '20410101-20701231' not in s]
+                        if((model == 'R5-G5') & (yow_end < 2071)): fut_nc_files_locs = [s for s in fut_nc_files_locs if '20710101-20981231' not in s]
+                        if((model != 'R5-G5') & (yow_end < 2071)): fut_nc_files_locs = [s for s in fut_nc_files_locs if '20710101-21001231' not in s]
+                        
+                        if ((model == 'R3-G4') | (model == 'R4-G2')):
+                            ncs = []
+                            for no_files in fut_nc_files_locs:                    
+                                nc_combined_x = xr.open_mfdataset(no_files, combine = 'by_coords') #combines the netcdf files into one large one
+                                start_date_x = str(yow_start) +'-07-01' #creating the 30 year time series of which the year of warming is placed in the centre
+                                end_date_x = str(yow_end) +'-06-30'
+                                if no_files == fut_nc_files_locs[0]:
+                                    da_warming_x = nc_combined_x.sel(time=slice(start_date_x, str(pd.to_datetime(nc_combined_x.variables['time'].values[len(nc_combined_x.variables['time'])-1]).date().year) +'-12-31')) 
+                                else:
+                                    da_warming_x = nc_combined_x.sel(time=slice(str(pd.to_datetime(nc_combined_x.variables['time'].values[0]).date().year) +'-01-01', end_date_x))         
+                                ncs.append(da_warming_x)    
+                        else:
+                            ncs_combined = xr.open_mfdataset(fut_nc_files_locs, combine = 'by_coords')
+                            if model == 'R5-G5': #R5-G5 is the only model that works with a 360 day year calendar                                                     
+                                start_date = cftime.Datetime360Day(yow_start, 7, 1, 12, 0, 0, 0)         
+                                end_date = cftime.Datetime360Day(yow_end, 6, 30, 12, 0, 0, 0)                            
+                                da_warming = ncs_combined.sel(time=slice(start_date, end_date))                              
+                            else:
+                                start_date_x = str(yow_start) +'-07-01' #creating the 30 year time series of which the year of warming is placed in the centre
+                                end_date_x = str(yow_end) +'-06-30' 
+                                da_warming = ncs_combined.sel(time=slice(start_date_x, end_date_x))                         
+                        if ((model != 'R3-G4') & (model != 'R4-G2')): rail_buckle_analysis(model, [da_warming], SFT, rcp, warming)        
+                        else: rail_buckle_analysis(model, ncs, SFT, rcp, warming)
+                        
+# =============================================================================
+# This loads the csvs created by rail_buckle_analysis and calculates the associated
+# estimated annual damage.
+# =============================================================================
+                
+def rail_buckle_damages():
+    rail_types = ["Conventional","High_Speed"]
+    buckling_scens = ["tangent", "curved_1", "curved_2", "curved_3", "curved_4", "curved_5", "curved_6", "curved_7", "curved_8", "curved_9", "curved_10"]
+    nc_files = gen_file_locs()
+    models = nc_files["model"].unique()
+    models.sort()
+    rail_infra = compile_rail_infra()
+    column_names = rail_infra.columns
+    NUTS = [s for s in column_names if "NUTS" in s]
+    rail_infra = rail_infra[['Region','infra_type','TT_TYPE', 'fclass', 'Distance','ArcLength','Radius','Latitude','Longitude'] + NUTS].copy()
+    rail_infra["curvature"] = 0
+    rail_infra = rail_infra.reset_index()
+    rail_infra.loc[rail_infra["Radius"] != 0, "curvature"] = 2*180*np.arcsin(15.24/rail_infra.Radius)/math.pi
+
+    rail_infra["curvature"] = abs(rail_infra["curvature"]).round()
+    rail_infra.loc[rail_infra["curvature"] > 10, "curvature"] = 10 
+    rail_infra = rail_infra[(rail_infra["fclass"] != "subway") & (rail_infra["fclass"] != "tram")]            
+    rail_infra.loc[rail_infra["TT_TYPE"] != "High speed", "fclass"] = "Conventional"
+    rail_infra.loc[rail_infra["TT_TYPE"] == "High speed", "fclass"] = "High_Speed"
+    rail_infra["curve_name"] = "tangent"
+    rail_infra.loc[rail_infra["curvature"] != 0, "curve_name"] = "curved_" + ((rail_infra["curvature"]).astype(int)).astype(str)
+    
+    rail_valuation = pd.read_excel(Model_Location + "Inputs/Other/Valuation/Rail_Cost_per_kilometer.xlsx", sheet_name = "OSM")
+    rail_values = rail_valuation[['Region','fclass','Value']]
+    rail_values = rail_values[rail_values["fclass"] == "conventional"]
+    rail_values = rail_values[["Region","Value"]]
+    rail_values = rail_values.set_index(['Region'])
+    rail_infra = rail_infra.set_index(['Region']).join(rail_values).reset_index() #Adds the rail value per km to the dataframe
+    rail_infra["Value"] = rail_infra["Value"]*1000000
+    rail_infra.loc[rail_infra["curve_name"] != "tangent", "Distance"] = rail_infra["ArcLength"]
+    rail_infra['Longitude'] = rail_infra['Longitude'].round(2).astype(str)
+    rail_infra['Latitude'] = rail_infra['Latitude'].round(2).astype(str)
+    
+    block_section = 6 #space between trains, in km
+    Buckle_Length = 20/1000 #12-25m
+    completion = 0
+
+    for model in models:
+        for rcp in ["hist","rcp45","rcp85"]:   
+            for warming in ["hist",'1.5','2','3']:
+                print(str(round(100*completion/(11*4*3),2)) + "%")
+                completion = completion + 1                
+                #There is only one level of warming for the historical period, i.e., "hist", so if the buckle events file does not exist, then it is pass over.
+                if not os.path.isfile(Model_Location + "Temp/Heatwaves/buckling_events2/" + model + "_" + rcp + "_" + warming + "_" + rail_types[0] + "_" + buckling_scens[0] + ".csv"):
+                    pass
+                else:                
+                    all_buckling_scens = pd.DataFrame()
+                    if not os.path.isfile(Model_Location + "Temp/Heatwaves/lats_file.csv"):
+                        get_lats_lons()
+                    all_buckling_scens_Lat_Lon = pd.read_csv(Model_Location + "Temp/Heatwaves/PG_empty_df.csv", index_col = None)
+                    for rail_type in rail_types:
+                        for buckling_scen in buckling_scens:
+                            temp_buckling_events_np = genfromtxt(Model_Location + "Temp/Heatwaves/buckling_events2/" + model + "_" + rcp + "_" + warming + "_" + rail_type + "_" + buckling_scen + ".csv", delimiter=',')
+                            temp_buckling_events_df = np2df(temp_buckling_events_np)
+                            temp_buckling_events_df["fclass"] = rail_type
+                            temp_buckling_events_df["curve_name"] = buckling_scen
+                            temp_buckling_events_df["Latitude"] = all_buckling_scens_Lat_Lon["latitude"]
+                            temp_buckling_events_df["Longitude"] = all_buckling_scens_Lat_Lon["longitude"]
+                            temp_buckling_events_df['Longitude'] = temp_buckling_events_df['Longitude'].round(2).astype(str)
+                            temp_buckling_events_df['Latitude'] = temp_buckling_events_df['Latitude'].round(2).astype(str)
+    
+                            all_buckling_scens = all_buckling_scens.append(temp_buckling_events_df)
+                    all_buckling_scens = all_buckling_scens.set_index(["fclass", "curve_name","Latitude","Longitude"])
+                    rail_results = rail_infra.copy()
+                    rail_results = rail_results.set_index(["fclass", "curve_name","Latitude","Longitude"]).join(all_buckling_scens).reset_index()
+                    rail_results.EAD = 0
+                    rail_results.loc[rail_results["curve_name"] == "tangent", "Buckle_Events"] = rail_results["Buckle_Events"]*(rail_results["Distance"]/1000)/block_section
+                    rail_results.loc[rail_results["curve_name"] == "tangent", "EAD"] = (Buckle_Length*rail_results["Buckle_Events"]*rail_results["Value"]/30)
+                    rail_results.loc[rail_results["curve_name"] != "tangent", "EAD"] = (Buckle_Length*rail_results["Buckle_Events"]*rail_results["Value"]/30)
+                    export_columns = ['curve_name', 'fclass','NUTS_3_ID','NUTS_2_ID','NUTS_1_ID','NUTS_0_ID','Buckle_Events','EAD']
+                    rail_results = rail_results[export_columns]
+                    rail_results = rail_results.fillna(0)
+                    
+                    rail_results["Buckle_Events"] = rail_results["Buckle_Events"]/30
+                    
+                    rail_results.loc[rail_results["NUTS_1_ID"] == 0, "NUTS_1_ID"] = rail_results["NUTS_0_ID"]
+                    rail_results.loc[rail_results["NUTS_2_ID"] == 0, "NUTS_2_ID"] = rail_results["NUTS_1_ID"]
+                    rail_results.loc[rail_results["NUTS_3_ID"] == 0, "NUTS_3_ID"] = rail_results["NUTS_2_ID"]
+                    
+                    # =============================================================================
+                    # Grouping by rail type and curvature, and exporting a file for each NUTS grouping            
+                    # =============================================================================
+                    rail_results_rail_distinction_NUTS3 = rail_results.groupby(['curve_name', 'fclass','NUTS_3_ID','NUTS_2_ID','NUTS_1_ID','NUTS_0_ID']).sum().reset_index()
+                    rail_results_rail_distinction_NUTS3.to_csv(Model_Location + "Results/Railway Buckling/rail_type/" + model + "_" + rcp + "_" + warming + "_NUTS3.csv")
+                    rail_results_rail_distinction_NUTS2 = rail_results.groupby(['curve_name', 'fclass','NUTS_2_ID','NUTS_1_ID','NUTS_0_ID']).sum().reset_index()
+                    rail_results_rail_distinction_NUTS2.to_csv(Model_Location + "Results/Railway Buckling/rail_type/" + model + "_" + rcp + "_" + warming + "_NUTS2.csv")
+                    rail_results_rail_distinction_NUTS1 = rail_results.groupby(['curve_name', 'fclass','NUTS_1_ID','NUTS_0_ID']).sum().reset_index()
+                    rail_results_rail_distinction_NUTS1.to_csv(Model_Location + "Results/Railway Buckling/rail_type/" + model + "_" + rcp + "_" + warming + "_NUTS1.csv")
+                    rail_results_rail_distinction_NUTS0 = rail_results.groupby(['curve_name', 'fclass','NUTS_0_ID']).sum().reset_index()
+                    rail_results_rail_distinction_NUTS0.to_csv(Model_Location + "Results/Railway Buckling/rail_type/" + model + "_" + rcp + "_" + warming + "_NUTS0.csv")
+                    
+                    # =============================================================================
+                    # Summing up regardless of rail type and curvature, and exporting a file for each NUTS grouping            
+                    # =============================================================================
+                    rail_results_rail_distinction_NUTS3 = rail_results.groupby(['NUTS_3_ID','NUTS_2_ID','NUTS_1_ID','NUTS_0_ID']).sum().reset_index()
+                    rail_results_rail_distinction_NUTS3.to_csv(Model_Location + "Results/Railway Buckling/all/" + model + "_" + rcp + "_" + warming + "_NUTS3.csv")
+                    rail_results_rail_distinction_NUTS2 = rail_results.groupby(['NUTS_2_ID','NUTS_1_ID','NUTS_0_ID']).sum().reset_index()
+                    rail_results_rail_distinction_NUTS2.to_csv(Model_Location + "Results/Railway Buckling/all/" + model + "_" + rcp + "_" + warming + "_NUTS2.csv")
+                    rail_results_rail_distinction_NUTS1 = rail_results.groupby(['NUTS_1_ID','NUTS_0_ID']).sum().reset_index()
+                    rail_results_rail_distinction_NUTS1.to_csv(Model_Location + "Results/Railway Buckling/all/" + model + "_" + rcp + "_" + warming + "_NUTS1.csv")
+                    rail_results_rail_distinction_NUTS0 = rail_results.groupby(['NUTS_0_ID']).sum().reset_index()
+                    rail_results_rail_distinction_NUTS0.to_csv(Model_Location + "Results/Railway Buckling/all/" + model + "_" + rcp + "_" + warming + "_NUTS0.csv")
+                    
+ 
+                
+                
